@@ -120,6 +120,21 @@ def create_oauth_state() -> str:
     return secrets.token_urlsafe(24)
 
 
+def _shopify_admin_api_error(response: requests.Response) -> str:
+    body = (response.text or "").strip()
+    if len(body) > 500:
+        body = f"{body[:500]}..."
+    return f"{response.status_code} {response.reason}: {body or 'empty response body'}"
+
+
+def _static_token_is_usable(token: str) -> bool:
+    # Shopify Admin API tokens are normally shpat_/shpua_/shppa_. The atkn_
+    # value is not accepted by Admin GraphQL and causes protected data 401s.
+    if token.lower().startswith("atkn_"):
+        return False
+    return bool(token)
+
+
 def exchange_oauth_code_for_token(shop: str, code: str) -> dict[str, Any]:
     response = requests.post(
         f"https://{shop}/admin/oauth/access_token",
@@ -127,11 +142,13 @@ def exchange_oauth_code_for_token(shop: str, code: str) -> dict[str, Any]:
             "client_id": get_client_id(),
             "client_secret": get_client_secret(),
             "code": code,
-            "expiring": 1,
         },
         timeout=30,
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        raise RuntimeError(_shopify_admin_api_error(response)) from error
     return response.json()
 
 
@@ -212,13 +229,20 @@ def get_graphql_token() -> str:
 
     static_token = _clean(os.getenv("SHOPIFY_GRAPHQL_ACCESS_TOKEN"))
     if static_token:
-        _last_token_error = ""
-        return static_token
+        if not _static_token_is_usable(static_token):
+            _last_token_error = (
+                "SHOPIFY_GRAPHQL_ACCESS_TOKEN starts with atkn_, which is not a Shopify Admin API access token. "
+                "Use a shpat_ Admin API token or remove it and install OAuth."
+            )
+        else:
+            _last_token_error = ""
+            return static_token
 
     now = time.time()
     if _token_cache["token"] and now < float(_token_cache["expires_at"] or 0):
         _last_token_error = ""
         return str(_token_cache["token"])
+
 
     stored_token = _clean(get_app_setting(SHOPIFY_TOKEN_SETTING_KEY))
     stored_shop = _clean(get_app_setting(SHOPIFY_INSTALLED_SHOP_KEY)) or get_shop_domain()
@@ -269,9 +293,12 @@ def get_protected_data_config_status() -> dict[str, Any]:
     static_token = _clean(os.getenv("SHOPIFY_GRAPHQL_ACCESS_TOKEN"))
     stored_token = _clean(get_app_setting(SHOPIFY_TOKEN_SETTING_KEY))
     token = get_graphql_token()
+    static_token_usable = _static_token_is_usable(static_token)
     auth_mode = "unconfigured"
-    if static_token:
+    if static_token and static_token_usable:
         auth_mode = "static_token"
+    elif static_token and not static_token_usable:
+        auth_mode = "invalid_static_token"
     elif stored_token:
         auth_mode = "oauth_offline_token"
     elif get_client_id() and get_client_secret():
@@ -283,16 +310,18 @@ def get_protected_data_config_status() -> dict[str, Any]:
         "api_version": get_graphql_api_version(),
         "auth_mode": auth_mode,
         "has_static_access_token": bool(static_token),
+        "static_access_token_usable": static_token_usable,
+        "static_access_token_prefix": static_token[:5] if static_token else "",
         "has_client_id": bool(get_client_id()),
         "has_client_secret": bool(get_client_secret()),
         "has_stored_oauth_token": bool(stored_token),
         "has_access_token": bool(token),
-        "token_source_ready": bool(static_token or stored_token or (get_client_id() and get_client_secret())),
+        "token_source_ready": bool((static_token and static_token_usable) or stored_token or (get_client_id() and get_client_secret())),
         "oauth_scopes": get_app_setting(SHOPIFY_SCOPE_SETTING_KEY),
         "installed_shop": get_app_setting(SHOPIFY_INSTALLED_SHOP_KEY),
         "requested_oauth_scopes": ",".join(get_oauth_scopes()),
         "has_refresh_token": bool(_clean(get_app_setting(SHOPIFY_REFRESH_TOKEN_SETTING_KEY))),
-        "token_error": _last_token_error if not token else "",
+        "token_error": _last_token_error,
         "install_url": f"{get_app_base_url()}/shopify/install",
     }
 
@@ -402,7 +431,7 @@ def fetch_protected_order_details(order_ids: list[int | str]) -> tuple[dict[str,
     try:
         response.raise_for_status()
     except requests.HTTPError as error:
-        return {}, [f"Protected order detail batch failed: {error}"]
+        return {}, [f"Protected order detail batch failed: {_shopify_admin_api_error(response)}"]
 
     payload = response.json()
 
