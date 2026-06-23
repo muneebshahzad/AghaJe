@@ -28,7 +28,9 @@ from flask import (
 from markupsafe import Markup
 
 from db import (
+    create_account_transaction,
     delete_order_status,
+    get_accounts_page_data,
     get_app_setting,
     init_db,
     load_order_statuses,
@@ -1844,6 +1846,7 @@ def build_admin_mobile_sections():
         {"id": "scanner", "label": "Scanner", "icon": "🔍", "src": "/employee_portal"},
         {"id": "employee-orders", "label": "Orders", "icon": "🧾", "src": "/employee_portal/orders"},
         {"id": "pending", "label": "Pending", "icon": "📋", "src": "/pending?embedded=1"},
+        {"id": "accounts", "label": "Accounts", "icon": "💼", "src": "/accounts?embedded=1"},
         {"id": "undelivered", "label": "Undelivered", "icon": "🚚", "src": "/undelivered?embedded=1"},
     ]
 
@@ -2020,6 +2023,36 @@ def update_product_costs():
         return jsonify({"success": True, "price": submitted_price, "cost": submitted_cost})
     except Exception as error:
         return jsonify({"success": False, "error": str(error)}), 500
+
+
+@app.route("/accounts", methods=["GET", "POST"])
+def accounts():
+    if not admin_portal_is_authenticated():
+        return redirect(url_for("admin_portal", section="accounts"))
+
+    notice = ""
+    error_message = ""
+    if request.method == "POST":
+        try:
+            create_account_transaction(request.form)
+            notice = "Transaction saved."
+        except Exception as error:
+            error_message = str(error)
+
+    data = get_accounts_page_data()
+    if data is None:
+        error_message = error_message or "Accounts database is not connected yet. Add Railway Postgres DATABASE_URL to enable this page."
+        data = {
+            "accounts": [],
+            "categories": {"income": [], "expense": []},
+            "transactions": [],
+            "balances": [],
+            "summary": {},
+            "monthly": [],
+            "category_breakdown": [],
+            "ledgers": [],
+        }
+    return render_template("accounts.html", data=data, notice=notice, error_message=error_message)
 
 
 @app.route("/orders")
