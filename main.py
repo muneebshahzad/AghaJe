@@ -1839,7 +1839,7 @@ def build_admin_mobile_sections():
             "id": "sleekspace-aghaje",
             "label": "Aghaje Ledger",
             "icon": "🏪",
-            "src": "https://dashboard.thesleekspace.com/aghaje-orders?embedded=1",
+            "src": "https://dashboard.thesleekspace.com/aghaje-portal",
         },
         {"id": "scanner", "label": "Scanner", "icon": "🔍", "src": "/employee_portal"},
         {"id": "employee-orders", "label": "Orders", "icon": "🧾", "src": "/employee_portal/orders"},
