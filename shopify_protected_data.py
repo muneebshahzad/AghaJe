@@ -122,9 +122,11 @@ def create_oauth_state() -> str:
 
 def _shopify_admin_api_error(response: requests.Response) -> str:
     body = (response.text or "").strip()
-    if len(body) > 500:
-        body = f"{body[:500]}..."
-    return f"{response.status_code} {response.reason}: {body or 'empty response body'}"
+    if len(body) > 1200:
+        body = f"{body[:1200]}..."
+    request_id = response.headers.get("x-request-id") or response.headers.get("X-Request-ID") or ""
+    request_note = f" x-request-id={request_id}" if request_id else ""
+    return f"{response.status_code} {response.reason}{request_note}: {body or 'empty response body'}"
 
 
 def _static_token_is_usable(token: str) -> bool:
@@ -138,11 +140,12 @@ def _static_token_is_usable(token: str) -> bool:
 def exchange_oauth_code_for_token(shop: str, code: str) -> dict[str, Any]:
     response = requests.post(
         f"https://{shop}/admin/oauth/access_token",
-        json={
+        data={
             "client_id": get_client_id(),
             "client_secret": get_client_secret(),
             "code": code,
         },
+        headers={"Accept": "application/json"},
         timeout=30,
     )
     try:
@@ -155,15 +158,19 @@ def exchange_oauth_code_for_token(shop: str, code: str) -> dict[str, Any]:
 def _refresh_offline_token(shop: str, refresh_token: str) -> dict[str, Any]:
     response = requests.post(
         f"https://{shop}/admin/oauth/access_token",
-        json={
+        data={
             "client_id": get_client_id(),
             "client_secret": get_client_secret(),
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
         },
+        headers={"Accept": "application/json"},
         timeout=30,
     )
-    response.raise_for_status()
+    try:
+        response.raise_for_status()
+    except requests.HTTPError as error:
+        raise RuntimeError(_shopify_admin_api_error(response)) from error
     return response.json()
 
 
