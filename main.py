@@ -1835,6 +1835,12 @@ def verify_shopify_webhook(req):
 def build_admin_mobile_sections():
     return [
         {"id": "dashboard", "label": "Dashboard", "icon": "🏠", "src": "/?embedded=1"},
+        {
+            "id": "sleekspace-aghaje",
+            "label": "Aghaje Ledger",
+            "icon": "🏪",
+            "src": "https://dashboard.thesleekspace.com/aghaje-orders?embedded=1",
+        },
         {"id": "scanner", "label": "Scanner", "icon": "🔍", "src": "/employee_portal"},
         {"id": "employee-orders", "label": "Orders", "icon": "🧾", "src": "/employee_portal/orders"},
         {"id": "pending", "label": "Pending", "icon": "📋", "src": "/pending?embedded=1"},
