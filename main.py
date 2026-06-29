@@ -2150,9 +2150,11 @@ def accounts():
     if request.method == "POST":
         try:
             create_account_transaction(request.form)
-            notice = "Transaction saved."
+            return redirect(url_for("accounts", saved="1"))
         except Exception as error:
             error_message = str(error)
+    elif request.args.get("saved") == "1":
+        notice = "Transaction saved."
 
     data = get_accounts_page_data()
     if data is None:
