@@ -1359,6 +1359,87 @@ def mark_shopify_order_as_paid(order_id):
     return result.get("order") or {}
 
 
+def archive_shopify_order(order_id):
+    order = shopify.Order.find(order_id)
+    result = order.close()
+    if result is False:
+        raise RuntimeError("Shopify order close returned false.")
+    return True
+
+
+def normalize_order_reference(value):
+    return "".join(ch for ch in str(value or "").upper() if ch.isalnum())
+
+
+def get_sleekspace_paid_aghaje_order_ids():
+    url = (
+        os.getenv("SLEEKSPACE_AGHAJE_PAID_ORDERS_URL")
+        or "https://dashboard.thesleekspace.com/aghaje-orders/paid-order-ids"
+    ).strip()
+    if not url:
+        return set()
+    response = requests.get(url, timeout=20)
+    response.raise_for_status()
+    payload = response.json()
+    if payload.get("success") is False:
+        raise RuntimeError(payload.get("error") or "Sleek Space paid-order lookup failed.")
+    return {
+        normalize_order_reference(order_id)
+        for order_id in payload.get("paid_order_ids", [])
+        if normalize_order_reference(order_id)
+    }
+
+
+def find_cached_order_by_shopify_id(order_id):
+    normalized = str(order_id or "").strip()
+    for order in order_details:
+        if str(order.get("id") or "").strip() == normalized:
+            return order
+    return None
+
+
+def mark_paid_and_archive_order(order_id, paid_ledger_order_ids=None, require_ledger_paid=True):
+    cached_order = find_cached_order_by_shopify_id(order_id)
+    if not cached_order:
+        return {"success": False, "order_id": str(order_id), "error": "Order is not loaded in the active dashboard cache."}
+
+    order_name = str(cached_order.get("order_id") or "").strip()
+    if require_ledger_paid:
+        paid_ledger_order_ids = paid_ledger_order_ids if paid_ledger_order_ids is not None else get_sleekspace_paid_aghaje_order_ids()
+        if normalize_order_reference(order_name) not in paid_ledger_order_ids:
+            return {
+                "success": False,
+                "order_id": str(order_id),
+                "order_name": order_name,
+                "skipped": True,
+                "error": "Not marked Paid in Sleek Space ledger.",
+            }
+
+    warnings = []
+    financial_status = str(cached_order.get("financial_status") or "").strip().lower()
+    if financial_status not in PAID_FINANCIAL_STATUSES:
+        try:
+            mark_shopify_order_as_paid(order_id)
+        except Exception as error:
+            warnings.append(f"Could not mark paid: {error}")
+
+    try:
+        archive_shopify_order(order_id)
+    except Exception as error:
+        warnings.append(f"Could not archive: {error}")
+
+    if warnings:
+        return {
+            "success": False,
+            "order_id": str(order_id),
+            "order_name": order_name,
+            "error": " ".join(warnings),
+        }
+
+    order_details[:] = [order for order in order_details if str(order.get("id") or "").strip() != str(order_id).strip()]
+    return {"success": True, "order_id": str(order_id), "order_name": order_name}
+
+
 def capture_shopify_payment(order):
     financial_status = ((getattr(order, "financial_status", "") or "")).lower()
     if financial_status in {"paid", "partially_paid"}:
@@ -1928,6 +2009,40 @@ def apply_tag():
         return jsonify({"success": False, "error": "Failed to save order changes."}), 500
     except Exception as error:
         return jsonify({"success": False, "error": str(error)}), 500
+
+
+@app.route("/mark_paid_archive", methods=["POST"])
+def mark_paid_archive():
+    data = request.get_json() or {}
+    order_ids = data.get("order_ids")
+    if order_ids is None:
+        order_ids = [data.get("order_id")]
+    order_ids = [str(order_id).strip() for order_id in order_ids if str(order_id or "").strip()]
+    if not order_ids:
+        return jsonify({"success": False, "error": "No order IDs provided."}), 400
+
+    try:
+        paid_ledger_order_ids = get_sleekspace_paid_aghaje_order_ids()
+    except Exception as error:
+        return jsonify({"success": False, "error": f"Could not read Sleek Space paid ledger: {error}"}), 502
+
+    results = [
+        mark_paid_and_archive_order(order_id, paid_ledger_order_ids=paid_ledger_order_ids, require_ledger_paid=True)
+        for order_id in order_ids
+    ]
+    marked = [result for result in results if result.get("success")]
+    skipped = [result for result in results if result.get("skipped")]
+    failed = [result for result in results if not result.get("success") and not result.get("skipped")]
+    return jsonify(
+        {
+            "success": not failed and bool(marked),
+            "marked_order_ids": [result.get("order_id") for result in marked],
+            "marked_order_names": [result.get("order_name") for result in marked],
+            "skipped": skipped,
+            "failed": failed,
+            "message": f"Marked paid and archived {len(marked)} order(s). Skipped {len(skipped)} not paid in Sleek Space.",
+        }
+    ), 207 if failed else 200
 
 
 @app.route("/")

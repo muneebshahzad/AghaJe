@@ -397,7 +397,7 @@
                 Mark As <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
               </button>
               <div class="dropdown-menu" id="dta-{{ order.id }}" style="top:110%;right:0;left:auto;">
-                <button class="dd-item" onclick="markOrder('{{ order.id }}','Delivered');closeDD()">✅ Delivered</button>
+                <button class="dd-item" onclick="markOrder('{{ order.id }}','Paid');closeDD()">✅ Mark as paid</button>
                 <button class="dd-item danger" onclick="markOrder('{{ order.id }}','Returned');closeDD()">↩ Returned</button>
                 <button class="dd-item danger" onclick="markOrder('{{ order.id }}','Cancelled');closeDD()">✕ Cancelled</button>
                 <button class="dd-item" onclick="markOrder('{{ order.id }}','Confirmed');closeDD()">✓ Confirmed</button>
@@ -471,7 +471,7 @@
               Mark As <svg width="10" height="10" viewBox="0 0 10 10" fill="none"><path d="M2 3.5L5 6.5L8 3.5" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"/></svg>
             </button>
             <div class="dropdown-menu" id="mba-{{ order.id }}">
-              <button class="dd-item" onclick="markOrder('{{ order.id }}','Delivered');closeDD()">✅ Delivered</button>
+              <button class="dd-item" onclick="markOrder('{{ order.id }}','Paid');closeDD()">✅ Mark as paid</button>
               <button class="dd-item danger" onclick="markOrder('{{ order.id }}','Returned');closeDD()">↩ Returned</button>
               <button class="dd-item danger" onclick="markOrder('{{ order.id }}','Cancelled');closeDD()">✕ Cancelled</button>
               <button class="dd-item" onclick="markOrder('{{ order.id }}','Confirmed');closeDD()">✓ Confirmed</button>
@@ -502,8 +502,8 @@
 
   <!-- Bottom bar -->
   <div class="bottom-bar" id="bottomBar">
-    <button class="bottom-btn bb-green" id="btnDeliver" onclick="applyDeliveredToAll()">
-      ✅ <span id="deliverLabel">Bulk Mark Delivered</span>
+    <button class="bottom-btn bb-green" id="btnDeliver" onclick="applyPaidArchiveToAll()">
+      ✅ <span id="deliverLabel">Bulk Mark Paid</span>
     </button>
     <button class="bottom-btn bb-red" id="btnReturn" onclick="applyReturnedToAll()">
       ↩ <span id="returnLabel">Mark All Returned</span>
@@ -618,6 +618,14 @@ function orderNeedsAttention(order) {
 function isUnpaidOrder(order) {
   const financial = `${order?.financial_status || ''}`.trim().toLowerCase();
   return !['paid', 'partially paid', 'partially_paid', 'partially-paid'].includes(financial);
+}
+
+function removeArchivedOrderCard(orderId) {
+  const id = String(orderId);
+  const index = ORDER_DATA.findIndex(o => String(o.id) === id);
+  if (index >= 0) ORDER_DATA.splice(index, 1);
+  const card = document.getElementById('order-card-' + id);
+  if (card) card.remove();
 }
 
 const MANUAL_STATUS_TAGS = {
@@ -821,10 +829,10 @@ function updateBottomBar() {
   ofdCount = visibleOrders.filter(o => normalizeStatusBucket(o.status) === 'Out For Delivery').length;
   deliveredCount = visibleOrders.filter(o => normalizeStatusBucket(o.status) === 'Delivered').length;
   rtsCount = visibleOrders.filter(o => normalizeStatusBucket(o.status) === 'RETURNED TO SHIPPER').length;
-  const deliverTargetCount = effectiveFilter === 'Delivered' ? deliveredCount : ofdCount;
-  document.getElementById('deliverLabel').textContent = `Bulk Mark Delivered (${deliverTargetCount} Orders)`;
+  const deliverTargetCount = effectiveFilter === 'Delivered' ? deliveredCount : 0;
+  document.getElementById('deliverLabel').textContent = `Bulk Mark Paid (${deliverTargetCount} Orders)`;
   document.getElementById('returnLabel').textContent  = `Mark All Returned (${rtsCount} Orders)`;
-  const showDeliver = (effectiveFilter === 'Out For Delivery' && ofdCount > 0) || (effectiveFilter === 'Delivered' && deliveredCount > 0);
+  const showDeliver = effectiveFilter === 'Delivered' && deliveredCount > 0;
   const showReturn = effectiveFilter === 'RETURNED TO SHIPPER' && rtsCount > 0;
   btnD.style.display = showDeliver ? 'flex' : 'none';
   btnR.style.display = showReturn ? 'flex' : 'none';
@@ -870,6 +878,10 @@ function applyFilterSearch() {
 
 // ── Mark single order ──
 function markOrder(orderId, tag) {
+  if ((tag || '').trim().toLowerCase() === 'paid') {
+    markPaidAndArchiveOrders([orderId]);
+    return;
+  }
   fetch('/apply_tag', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
@@ -885,6 +897,29 @@ function markOrder(orderId, tag) {
     updateOrderCardAfterMark(orderId, tag);
   })
   .catch(() => showToast('Request failed'));
+}
+
+async function markPaidAndArchiveOrders(orderIds) {
+  if (!orderIds.length) return;
+  try {
+    const response = await fetch('/mark_paid_archive', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ order_ids: orderIds }),
+    });
+    const data = await response.json();
+    (data.marked_order_ids || []).forEach(removeArchivedOrderCard);
+    if (data.success) {
+      showToast(data.message || `Marked paid and archived ${data.marked_order_ids.length} order(s)`);
+    } else {
+      const skipped = (data.skipped || []).length;
+      const failed = (data.failed || []).length;
+      showToast(data.error || data.message || `Marked ${(data.marked_order_ids || []).length}; skipped ${skipped}; failed ${failed}`);
+    }
+    filterOrders();
+  } catch (error) {
+    showToast('Paid/archive request failed');
+  }
 }
 
 function approveEmployeeRequest(orderId, trackingNumber, requestedStatus) {
@@ -960,26 +995,19 @@ async function bulkMark(tag) {
   clearSelection();
 }
 
-// ── Apply Delivered to All (Delivered tab or Out For Delivery → Delivered) ──
-async function applyDeliveredToAll() {
+// ── Mark visible delivered orders as paid and archive them when Sleek Space says they are paid ──
+async function applyPaidArchiveToAll() {
   const btn = document.getElementById('btnDeliver');
   const lbl = document.getElementById('deliverLabel');
   const q = document.getElementById('orderSearch').value.toLowerCase();
   const statusQueryBucket = getStatusQueryBucket(q);
   const effectiveFilter = statusQueryBucket || currentFilter;
-  const targetBucket = effectiveFilter === 'Delivered' ? 'Delivered' : 'Out For Delivery';
-  const toDeliver = getVisibleOrders().filter(o => normalizeStatusBucket(o.status) === targetBucket);
-  if (!toDeliver.length) return;
+  if (effectiveFilter !== 'Delivered') return;
+  const toMark = getVisibleOrders().filter(o => normalizeStatusBucket(o.status) === 'Delivered');
+  if (!toMark.length) return;
   btn.disabled = true;
-  for (let i = 0; i < toDeliver.length; i++) {
-    lbl.textContent = `Applying ${i+1}/${toDeliver.length}…`;
-    try {
-      await fetch('/apply_tag', { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({order_id: toDeliver[i].id, tag:'Delivered'}) });
-      updateOrderCardAfterMark(toDeliver[i].id, 'Delivered');
-    } catch(e) {}
-    await new Promise(r => setTimeout(r, 600));
-  }
-  showToast(`Applied "Delivered" to ${toDeliver.length} orders`);
+  lbl.textContent = `Checking ${toMark.length} orders...`;
+  await markPaidAndArchiveOrders(toMark.map(order => order.id));
   updateBottomBar();
   btn.disabled = false;
 }
