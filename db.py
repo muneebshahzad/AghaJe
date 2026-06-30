@@ -433,6 +433,32 @@ def get_accounts_page_data():
                         t.kind,
                         t.amount,
                         t.note,
+                        a.name AS account_name,
+                        c.name AS category_name,
+                        s.name AS subcategory_name
+                    FROM accounts_transactions t
+                    JOIN accounts_accounts a ON a.id = t.account_id
+                    JOIN accounts_categories c ON c.id = t.category_id
+                    LEFT JOIN accounts_subcategories s ON s.id = t.subcategory_id
+                    WHERE
+                        (
+                            (t.kind = 'income' AND c.name = 'Owner Investment')
+                            OR (t.kind = 'expense' AND c.name = 'Profit Withdrawal')
+                        )
+                        AND (s.name IS NULL OR s.name = 'Agha')
+                    ORDER BY t.tx_date, t.id
+                    """
+                )
+                agha_rows = [dict(row) for row in cur.fetchall()]
+
+                cur.execute(
+                    """
+                    SELECT
+                        t.id,
+                        t.tx_date,
+                        t.kind,
+                        t.amount,
+                        t.note,
                         a.id AS account_id,
                         a.name AS account_name,
                         c.name AS category_name,
@@ -462,6 +488,35 @@ def get_accounts_page_data():
         for ledger in ledgers.values():
             ledger["rows"].reverse()
 
+        agha_balance = 0.0
+        agha_investment_total = 0.0
+        agha_withdrawal_total = 0.0
+        agha_ledger_rows = []
+        for row in agha_rows:
+            amount = _money(row["amount"])
+            income = amount if row["kind"] == "income" else 0.0
+            expense = amount if row["kind"] == "expense" else 0.0
+            agha_investment_total += income
+            agha_withdrawal_total += expense
+            agha_balance += income - expense
+            item = dict(row)
+            item["income"] = income
+            item["expense"] = expense
+            item["running_balance"] = agha_balance
+            agha_ledger_rows.append(item)
+        agha_ledger_rows.reverse()
+        agha_ledger = {
+            "balance": agha_balance,
+            "investment_total": agha_investment_total,
+            "withdrawal_total": agha_withdrawal_total,
+            "rows": agha_ledger_rows,
+        }
+
+        category_breakdown_by_kind = {
+            "income": [row for row in category_breakdown if row.get("kind") == "income"],
+            "expense": [row for row in category_breakdown if row.get("kind") == "expense"],
+        }
+
         for collection in (accounts, transactions, balances, monthly, category_breakdown):
             for row in collection:
                 for key, value in list(row.items()):
@@ -469,6 +524,12 @@ def get_accounts_page_data():
                         row[key] = float(value)
                     elif isinstance(value, date):
                         row[key] = value.isoformat()
+        for row in agha_ledger["rows"]:
+            for key, value in list(row.items()):
+                if isinstance(value, Decimal):
+                    row[key] = float(value)
+                elif isinstance(value, date):
+                    row[key] = value.isoformat()
 
         for key, value in list(summary.items()):
             if isinstance(value, Decimal):
@@ -483,6 +544,8 @@ def get_accounts_page_data():
             "summary": summary,
             "monthly": monthly,
             "category_breakdown": category_breakdown,
+            "category_breakdown_by_kind": category_breakdown_by_kind,
+            "agha_ledger": agha_ledger,
             "ledgers": list(ledgers.values()),
         }
     except Exception as e:

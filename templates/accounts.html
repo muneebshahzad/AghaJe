@@ -5,10 +5,14 @@
 {% set summary = data.summary or {} %}
 {% set balances = data.balances or [] %}
 {% set categories = data.categories or {'income': [], 'expense': []} %}
+{% set category_groups = data.category_breakdown_by_kind or {'income': [], 'expense': []} %}
+{% set income_categories = category_groups.income or [] %}
+{% set expense_categories = category_groups.expense or [] %}
+{% set agha_ledger = data.agha_ledger or {'balance': 0, 'investment_total': 0, 'withdrawal_total': 0, 'rows': []} %}
 
 <style>
-  #main { overflow: auto; }
-  .accounts-page { padding: 24px; display: flex; flex-direction: column; gap: 18px; min-height: 100%; }
+  #main { min-height: 0; max-height: 100vh; overflow-y: auto !important; overflow-x: hidden; -webkit-overflow-scrolling: touch; }
+  .accounts-page { padding: 24px 24px 80px; display: flex; flex-direction: column; gap: 18px; min-height: max-content; }
   .accounts-top { display: flex; align-items: center; justify-content: space-between; gap: 14px; flex-wrap: wrap; }
   .accounts-title h1 { font-size: 24px; line-height: 1.1; color: #222431; margin-bottom: 5px; }
   .accounts-title p { color: #858796; font-size: 13px; }
@@ -64,17 +68,36 @@
   .bar-fill.income { background: #1cc88a; }
   .bar-fill.expense { background: #e74a3b; }
   .bar-fill.profit { background: #4e73df; }
+  .dashboard-stack { display: grid; gap: 18px; }
+  .insight-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; }
+  .insight-card { border: 1px solid #e8edf8; border-radius: 12px; padding: 14px; background: #fbfcff; }
+  .insight-card h3 { color: #222431; font-size: 13px; margin-bottom: 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; }
+  .insight-card h3 span { color: #858796; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; }
+  .insight-list { display: flex; flex-direction: column; gap: 9px; }
+  .insight-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 10px; align-items: center; color: #333746; font-size: 12px; }
+  .insight-name { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 800; }
+  .insight-value { font-family: 'DM Mono', monospace; font-weight: 900; white-space: nowrap; }
+  details.insight-more { margin-top: 10px; }
+  details.insight-more summary { cursor: pointer; color: #4e73df; font-size: 12px; font-weight: 900; list-style: none; }
+  details.insight-more summary::-webkit-details-marker { display: none; }
+  .agha-ledger-card { border: 1px solid #dbe1f1; border-radius: 12px; overflow: hidden; background: #fff; }
+  .agha-ledger-head { padding: 14px; display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 10px; border-bottom: 1px solid #edf1f9; }
+  .agha-ledger-metric { background: #f8f9fc; border-radius: 10px; padding: 11px; }
+  .agha-ledger-metric .label { color: #858796; font-size: 10px; font-weight: 900; text-transform: uppercase; letter-spacing: 0.08em; }
+  .agha-ledger-metric .value { margin-top: 6px; color: #222431; font-size: 17px; font-weight: 900; font-family: 'DM Mono', monospace; }
   .empty-state { padding: 40px 20px; text-align: center; color: #858796; font-size: 13px; }
 
   @media (max-width: 1100px) {
     .accounts-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
     .accounts-layout { grid-template-columns: 1fr; }
+    .insight-grid { grid-template-columns: 1fr; }
   }
   @media (max-width: 720px) {
-    .accounts-page { padding: 16px; }
+    .accounts-page { padding: 16px 16px 72px; }
     .accounts-grid { grid-template-columns: 1fr; }
     .form-grid { grid-template-columns: 1fr; }
     .accounts-title h1 { font-size: 22px; }
+    .agha-ledger-head { grid-template-columns: 1fr; }
   }
 </style>
 
@@ -180,21 +203,103 @@
           <p>Current month and rolling profit/loss.</p>
         </div>
       </div>
-      <div class="panel-body chart-rows">
-        {% set max_month_value = namespace(value=1) %}
-        {% for row in data.monthly %}
-          {% set row_max = [row.income|abs, row.expense|abs, row.profit|abs]|max %}
-          {% if row_max > max_month_value.value %}{% set max_month_value.value = row_max %}{% endif %}
-        {% endfor %}
-        {% for row in data.monthly %}
-          <div class="chart-row">
-            <strong>{{ row.label }}</strong>
-            <div class="bar-track"><div class="bar-fill profit" style="width: {{ ((row.profit|abs / max_month_value.value) * 100)|round(1) }}%;"></div></div>
-            <span class="{% if row.profit < 0 %}negative{% else %}positive{% endif %}">Rs {{ row.profit|format_number }}</span>
+      <div class="panel-body dashboard-stack">
+        <div class="chart-rows">
+          {% set max_month_value = namespace(value=1) %}
+          {% for row in data.monthly %}
+            {% set row_max = [row.income|abs, row.expense|abs, row.profit|abs]|max %}
+            {% if row_max > max_month_value.value %}{% set max_month_value.value = row_max %}{% endif %}
+          {% endfor %}
+          {% for row in data.monthly %}
+            <div class="chart-row">
+              <strong>{{ row.label }}</strong>
+              <div class="bar-track"><div class="bar-fill profit" style="width: {{ ((row.profit|abs / max_month_value.value) * 100)|round(1) }}%;"></div></div>
+              <span class="{% if row.profit < 0 %}negative{% else %}positive{% endif %}">Rs {{ row.profit|format_number }}</span>
+            </div>
+          {% else %}
+            <div class="empty-state">No monthly data yet. Add your first transaction to build the report.</div>
+          {% endfor %}
+        </div>
+
+        <div class="insight-grid">
+          <div class="insight-card">
+            <h3>Top Income <span>{{ now.strftime('%b %Y') }}</span></h3>
+            <div class="insight-list">
+              {% for row in income_categories[:5] %}
+                <div class="insight-row"><div class="insight-name">{{ row.category_name }}</div><div class="insight-value positive">Rs {{ row.total|format_number }}</div></div>
+              {% else %}
+                <div class="empty-state">No income categories this month.</div>
+              {% endfor %}
+            </div>
+            {% if income_categories|length > 5 %}
+              <details class="insight-more">
+                <summary>See all income categories</summary>
+                <div class="insight-list" style="margin-top:10px;">
+                  {% for row in income_categories[5:] %}
+                    <div class="insight-row"><div class="insight-name">{{ row.category_name }}</div><div class="insight-value positive">Rs {{ row.total|format_number }}</div></div>
+                  {% endfor %}
+                </div>
+              </details>
+            {% endif %}
           </div>
-        {% else %}
-          <div class="empty-state">No monthly data yet. Add your first transaction to build the report.</div>
-        {% endfor %}
+          <div class="insight-card">
+            <h3>Top Expenses <span>{{ now.strftime('%b %Y') }}</span></h3>
+            <div class="insight-list">
+              {% for row in expense_categories[:5] %}
+                <div class="insight-row"><div class="insight-name">{{ row.category_name }}</div><div class="insight-value negative">Rs {{ row.total|format_number }}</div></div>
+              {% else %}
+                <div class="empty-state">No expense categories this month.</div>
+              {% endfor %}
+            </div>
+            {% if expense_categories|length > 5 %}
+              <details class="insight-more">
+                <summary>See all expense categories</summary>
+                <div class="insight-list" style="margin-top:10px;">
+                  {% for row in expense_categories[5:] %}
+                    <div class="insight-row"><div class="insight-name">{{ row.category_name }}</div><div class="insight-value negative">Rs {{ row.total|format_number }}</div></div>
+                  {% endfor %}
+                </div>
+              </details>
+            {% endif %}
+          </div>
+        </div>
+
+        <div class="agha-ledger-card">
+          <div class="agha-ledger-head">
+            <div class="agha-ledger-metric">
+              <div class="label">Agha investment</div>
+              <div class="value positive">Rs {{ agha_ledger.investment_total|format_number }}</div>
+            </div>
+            <div class="agha-ledger-metric">
+              <div class="label">Agha withdrawal</div>
+              <div class="value negative">Rs {{ agha_ledger.withdrawal_total|format_number }}</div>
+            </div>
+            <div class="agha-ledger-metric">
+              <div class="label">Net Agha ledger</div>
+              <div class="value {% if agha_ledger.balance < 0 %}negative{% else %}positive{% endif %}">Rs {{ agha_ledger.balance|format_number }}</div>
+            </div>
+          </div>
+          <div class="table-wrap">
+            <table class="accounts-table">
+              <thead><tr><th>Date</th><th>Movement</th><th>Account</th><th>Note</th><th>Investment</th><th>Withdrawal</th><th>Balance</th></tr></thead>
+              <tbody>
+                {% for row in agha_ledger.rows[:8] %}
+                  <tr>
+                    <td>{{ row.tx_date }}</td>
+                    <td>{{ row.category_name }}{% if row.subcategory_name %} · {{ row.subcategory_name }}{% endif %}</td>
+                    <td>{{ row.account_name }}</td>
+                    <td>{{ row.note or '—' }}</td>
+                    <td class="money positive">{% if row.income %}Rs {{ row.income|format_number }}{% else %}—{% endif %}</td>
+                    <td class="money negative">{% if row.expense %}Rs {{ row.expense|format_number }}{% else %}—{% endif %}</td>
+                    <td class="money {% if row.running_balance < 0 %}negative{% else %}positive{% endif %}">Rs {{ row.running_balance|format_number }}</td>
+                  </tr>
+                {% else %}
+                  <tr><td colspan="7"><div class="empty-state">No Agha investment or withdrawal entries yet.</div></td></tr>
+                {% endfor %}
+              </tbody>
+            </table>
+          </div>
+        </div>
       </div>
     </section>
   </div>
@@ -294,19 +399,26 @@
     </div>
 
     <div class="tab-panel" id="tab-categories">
-      <div class="panel-body chart-rows">
-        {% set max_category_value = namespace(value=1) %}
-        {% for row in data.category_breakdown %}
-          {% if row.total > max_category_value.value %}{% set max_category_value.value = row.total %}{% endif %}
-        {% endfor %}
-        {% for row in data.category_breakdown %}
-          <div class="chart-row">
-            <strong>{{ row.category_name }}</strong>
-            <div class="bar-track"><div class="bar-fill {{ row.kind }}" style="width: {{ ((row.total / max_category_value.value) * 100)|round(1) }}%;"></div></div>
-            <span class="{% if row.kind == 'expense' %}negative{% else %}positive{% endif %}">Rs {{ row.total|format_number }}</span>
+      <div class="panel-body insight-grid">
+        {% for kind, rows in [('income', income_categories), ('expense', expense_categories)] %}
+          <div class="insight-card">
+            <h3>{{ 'Income' if kind == 'income' else 'Expenses' }} <span>All categories</span></h3>
+            <div class="chart-rows">
+              {% set max_category_value = namespace(value=1) %}
+              {% for row in rows %}
+                {% if row.total > max_category_value.value %}{% set max_category_value.value = row.total %}{% endif %}
+              {% endfor %}
+              {% for row in rows %}
+                <div class="chart-row">
+                  <strong>{{ row.category_name }}</strong>
+                  <div class="bar-track"><div class="bar-fill {{ row.kind }}" style="width: {{ ((row.total / max_category_value.value) * 100)|round(1) }}%;"></div></div>
+                  <span class="{% if row.kind == 'expense' %}negative{% else %}positive{% endif %}">Rs {{ row.total|format_number }}</span>
+                </div>
+              {% else %}
+                <div class="empty-state">No {{ kind }} categories yet.</div>
+              {% endfor %}
+            </div>
           </div>
-        {% else %}
-          <div class="empty-state">No category breakdown yet.</div>
         {% endfor %}
       </div>
     </div>
@@ -331,7 +443,10 @@ function rebuildSubcategories() {
   const category = (accountCategories[kind] || []).find(item => Number(item.id) === categoryId);
   const subcategorySelect = document.getElementById('subcategorySelect');
   const subcategories = category?.subcategories || [];
-  subcategorySelect.innerHTML = `<option value="">None</option>` + subcategories.map(item => `<option value="${item.id}">${item.name}</option>`).join('');
+  subcategorySelect.innerHTML = subcategories.length
+    ? subcategories.map(item => `<option value="${item.id}">${item.name}</option>`).join('')
+    : '';
+  subcategorySelect.disabled = subcategories.length === 0;
 }
 
 document.querySelectorAll('input[name="kind"]').forEach(input => input.addEventListener('change', rebuildCategories));

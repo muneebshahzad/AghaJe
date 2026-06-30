@@ -2167,6 +2167,8 @@ def accounts():
             "summary": {},
             "monthly": [],
             "category_breakdown": [],
+            "category_breakdown_by_kind": {"income": [], "expense": []},
+            "agha_ledger": {"balance": 0, "investment_total": 0, "withdrawal_total": 0, "rows": []},
             "ledgers": [],
         }
     return render_template("accounts.html", data=data, notice=notice, error_message=error_message)
