@@ -823,6 +823,7 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
         "paid_receivable": 0.0,
         "pending_payable": 0.0,
         "paid_payable": 0.0,
+        "undelivered_amount": 0.0,
     }
 
     for entry in orders:
@@ -837,14 +838,23 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
         reversal_tax = parse_money(data.get("reversalTax", 0))
         transaction_status = str(data.get("transactionStatus") or "").strip()
         normalized_transaction_status = transaction_status.lower()
-        is_delivered = int(order_status_id) == 5 or "delivered" in transaction_status.lower()
+        is_unbooked = int(order_status_id) == 1 or "unbook" in normalized_transaction_status
+        is_delivered = int(order_status_id) == 5 or "delivered" in normalized_transaction_status
         is_returned = int(order_status_id) in {6, 16} or "return" in normalized_transaction_status
+        is_undelivered = not is_delivered and not is_returned and not is_unbooked
         if is_returned:
             shipping_fee = round(reversal_fee + reversal_tax, 2)
-        else:
+        elif is_delivered:
             shipping_fee = round(transaction_fee + transaction_tax, 2)
+        else:
+            shipping_fee = 0.0
         delivered_tax = round(invoice_payment * 0.04, 2) if is_delivered else 0.0
-        net_receivable = round(-shipping_fee, 2) if is_returned else round(invoice_payment - shipping_fee - delivered_tax, 2)
+        if is_returned:
+            net_receivable = round(-shipping_fee, 2)
+        elif is_delivered:
+            net_receivable = round(invoice_payment - shipping_fee - delivered_tax, 2)
+        else:
+            net_receivable = 0.0
         payment_status = get_postex_payment_status_cache_only(tracking_number) or {}
         is_paid = bool(payment_status.get("settled"))
         status_label = "Paid" if is_paid else "Pending"
@@ -862,6 +872,8 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
             "settlement_date": payment_status.get("settlement_date") or "",
             "transaction_status": transaction_status,
             "is_returned": is_returned,
+            "is_delivered": is_delivered,
+            "is_undelivered": is_undelivered,
         }
         rows.append(row)
 
@@ -869,15 +881,18 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
         summary["invoice_payment"] += invoice_payment
         summary["shipping_fee"] += shipping_fee
         summary["delivered_tax"] += delivered_tax
-        summary["net_receivable"] += net_receivable
+        if is_undelivered:
+            summary["undelivered_amount"] += invoice_payment
         if is_returned:
+            summary["net_receivable"] += net_receivable
             if is_paid:
                 summary["paid_payable"] += shipping_fee
             elif status_label == "Pending":
                 summary["pending_payable"] += shipping_fee
-        elif is_paid:
+        elif is_delivered and is_paid:
             summary["paid_receivable"] += net_receivable
-        elif status_label == "Pending":
+        elif is_delivered and status_label == "Pending":
+            summary["net_receivable"] += net_receivable
             summary["pending_receivable"] += net_receivable
 
     for key in (
@@ -889,6 +904,7 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
         "paid_receivable",
         "pending_payable",
         "paid_payable",
+        "undelivered_amount",
     ):
         summary[key] = round(summary[key], 2)
 
@@ -2448,17 +2464,17 @@ def postex_payments():
         return redirect(url_for("admin_portal", section="postex-payments"))
 
     today = datetime.now().date()
-    default_start = today - timedelta(days=30)
+    default_start = today - timedelta(days=60)
     start_date = parse_iso_date(request.args.get("startDate") or request.args.get("start_date"), default_start)
     end_date = parse_iso_date(request.args.get("endDate") or request.args.get("end_date"), today)
     if start_date > end_date:
         start_date, end_date = end_date, start_date
     try:
-        order_status_id = int(request.args.get("orderStatusId") or request.args.get("order_status_id") or 5)
+        order_status_id = int(request.args.get("orderStatusId") or request.args.get("order_status_id") or 0)
     except (TypeError, ValueError):
-        order_status_id = 5
+        order_status_id = 0
     if order_status_id not in POSTEX_ORDER_STATUSES:
-        order_status_id = 5
+        order_status_id = 0
 
     error_message = ""
     data = {
@@ -2471,6 +2487,9 @@ def postex_payments():
             "net_receivable": 0.0,
             "pending_receivable": 0.0,
             "paid_receivable": 0.0,
+            "undelivered_amount": 0.0,
+            "pending_payable": 0.0,
+            "paid_payable": 0.0,
         },
         "statuses": POSTEX_ORDER_STATUSES,
         "selected_status": order_status_id,

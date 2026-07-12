@@ -76,6 +76,10 @@
       <div class="pay-card-label">Pending Receivable</div>
       <div class="pay-card-value">PKR {{ data.summary.pending_receivable|float|round|int|format_number }}</div>
     </div>
+    <div class="pay-card pending">
+      <div class="pay-card-label">Undelivered Amount</div>
+      <div class="pay-card-value">PKR {{ data.summary.undelivered_amount|float|round|int|format_number }}</div>
+    </div>
     <div class="pay-card deduct">
       <div class="pay-card-label">Pending Return Charges</div>
       <div class="pay-card-value">PKR {{ data.summary.pending_payable|float|round|int|format_number }}</div>
@@ -85,7 +89,7 @@
       <div class="pay-card-value">PKR {{ data.summary.paid_payable|float|round|int|format_number }}</div>
     </div>
     <div class="pay-card paid">
-      <div class="pay-card-label">Paid Receivable</div>
+      <div class="pay-card-label">Paid</div>
       <div class="pay-card-value">PKR {{ data.summary.paid_receivable|float|round|int|format_number }}</div>
     </div>
     <div class="pay-card">
@@ -108,6 +112,7 @@
         <tr>
           <th>Order ID</th>
           <th>Tracking#</th>
+          <th>Delivery Status</th>
           <th>Product</th>
           <th class="money">Shipping Fee</th>
           <th class="money">4% Tax</th>
@@ -120,6 +125,7 @@
         <tr>
           <td><span class="pay-order">{{ row.order_id or 'N/A' }}</span></td>
           <td><span class="pay-track">{{ row.tracking_number }}</span></td>
+          <td>{{ row.transaction_status or 'N/A' }}</td>
           <td><div class="pay-product">{{ row.product or 'No product detail' }}</div></td>
           <td class="pay-money money">PKR {{ row.shipping_fee|float|round|int|format_number }}</td>
           <td class="pay-money money">PKR {{ row.delivered_tax|float|round|int|format_number }}</td>
@@ -132,7 +138,7 @@
         </tr>
         {% else %}
         <tr>
-          <td colspan="7"><div class="pay-empty">No PostEx orders found for this status/date range.</div></td>
+          <td colspan="8"><div class="pay-empty">No PostEx orders found for this status/date range.</div></td>
         </tr>
         {% endfor %}
       </tbody>
