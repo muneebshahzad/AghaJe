@@ -65,25 +65,6 @@
   .shipper-advice-btns { display:flex; gap:8px; flex-wrap:wrap; justify-content:flex-end; }
   .shipper-advice-empty { padding:12px 14px; font-size:12px; color:#8a8b96; }
 
-  /* ── Payment receivables ── */
-  .tracking-content-grid { display:grid; grid-template-columns:minmax(0, 960px) minmax(280px, 330px); gap:14px; align-items:start; padding:10px 14px 0; }
-  .orders-column { min-width:0; display:flex; flex-direction:column; gap:10px; }
-  .payments-panel { position:sticky; top:10px; background:#fff; border:1.5px solid #e3e6f0; border-radius:12px; overflow:hidden; box-shadow:0 2px 14px rgba(78,115,223,0.06); }
-  .payments-head { padding:14px; border-bottom:1px solid #edf0f7; background:linear-gradient(180deg,#fffaf0 0%,#fff 100%); }
-  .payments-label { font-size:11px; font-weight:800; color:#d4a800; text-transform:uppercase; letter-spacing:.04em; }
-  .payments-amount { margin-top:4px; font-family:'DM Mono', monospace; font-size:24px; font-weight:800; color:#d4a800; line-height:1.1; }
-  .payments-sub { margin-top:3px; font-size:11px; color:#8a8b96; }
-  .payments-list { display:flex; flex-direction:column; max-height:calc(100vh - 250px); overflow:auto; }
-  .payment-row { display:grid; grid-template-columns:1fr auto; gap:10px; padding:11px 14px; border-top:1px solid #f1f3f8; text-decoration:none; color:#2d2e36; }
-  .payment-row:first-child { border-top:none; }
-  .payment-row:hover { background:#fafbff; }
-  .payment-order { font-size:12px; font-weight:800; color:#4e73df; }
-  .payment-meta { margin-top:2px; font-size:10px; color:#8a8b96; line-height:1.35; }
-  .payment-amount { font-family:'DM Mono', monospace; font-size:12px; font-weight:800; color:#d4a800; white-space:nowrap; }
-  .payment-empty { padding:14px; font-size:12px; color:#8a8b96; line-height:1.45; }
-  .payment-chip { display:inline-flex; align-items:center; border-radius:999px; padding:2px 7px; background:#fff4d1; color:#9b7200; font-size:9px; font-weight:800; margin-top:4px; }
-  .payment-chip.settled { background:#d9f7eb; color:#0e7a53; }
-
   /* ── Order card ── */
   .card { background: #fff; border-radius: 12px; border: 1.5px solid #e3e6f0; overflow: hidden; transition: box-shadow 0.15s, border-color 0.15s; }
   .card:hover { box-shadow: 0 2px 14px rgba(78,115,223,0.08); }
@@ -206,9 +187,6 @@
   }
 
   @media (max-width: 679px) {
-    .tracking-content-grid { display:flex; flex-direction:column; padding:10px 14px 0; }
-    .payments-panel { position:static; order:-1; }
-    .payments-list { max-height:none; }
     .approval-item { grid-template-columns: 56px 1fr; }
     .approval-actions { grid-column: 1 / -1; justify-content: stretch; }
     .shipper-advice-item { grid-template-columns: 56px 1fr; }
@@ -301,16 +279,14 @@
     </div>
     {% endif %}
 
-    <div class="tracking-content-grid">
-      <div class="orders-column">
-        <!-- ── Shopify Section ── -->
-        <div style="display:flex;align-items:center;gap:8px;margin-bottom:0;">
-          <div style="width:24px;height:24px;border-radius:6px;background:#96bf48;display:flex;align-items:center;justify-content:center;font-size:12px;">🛍</div>
-          <span style="font-size:13px;font-weight:700;color:#3a3b45;">Shopify Orders</span>
-          <span class="section-count" id="shopifyCount">0</span>
-        </div>
+    <!-- ── Shopify Section ── -->
+    <div style="padding:10px 14px 0;display:flex;align-items:center;gap:8px;margin-bottom:8px;">
+      <div style="width:24px;height:24px;border-radius:6px;background:#96bf48;display:flex;align-items:center;justify-content:center;font-size:12px;">🛍</div>
+      <span style="font-size:13px;font-weight:700;color:#3a3b45;">Shopify Orders</span>
+      <span class="section-count" id="shopifyCount">0</span>
+    </div>
 
-    <div style="display:flex;flex-direction:column;gap:10px;" id="shopifyOrderList">
+    <div style="padding:0 14px;display:flex;flex-direction:column;gap:10px;max-width:960px;" id="shopifyOrderList">
       {% for order in order_details %}
       {% set item0 = order.line_items[0] if order.line_items else {} %}
       {% set name  = item0.get('name') or order.customer_details.get('name') or '' %}
@@ -372,11 +348,6 @@
               <span class="product-notrack">No tracking</span>
               {% endif %}
               <span class="product-status {{ 'sb-delivered' if item.status|default('') == 'Delivered' else 'sb-return' if 'RETURN' in item.status|default('')|upper or 'UNDELIVERED' in item.status|default('')|upper else 'sb-ofd' if 'OUT FOR DELIVERY' in item.status|default('')|upper else 'sb-attention' if 'CONTACTING CONSIGNEE' in item.status|default('')|upper or 'MOVED TO ORIGIN BRANCH' in item.status|default('')|upper else 'sb-booked' }}">{{ item.status or 'Un-Booked' }}</span>
-              {% if item.is_postex %}
-              <span class="payment-chip {% if item.postex_payment_status and item.postex_payment_status.settled %}settled{% endif %}">
-                {% if item.postex_payment_status and item.postex_payment_status.settled %}Paid PostEx{% elif item.postex_payment_status and not item.postex_payment_status.error %}COD Pending{% else %}Payment unknown{% endif %}
-              </span>
-              {% endif %}
             </div>
             {% endfor %}
           </div>
@@ -486,11 +457,6 @@
             <a href="/track/{{ item.tracking_number }}" target="_blank" style="font-family:'DM Mono',monospace;font-size:9px;color:{% if item.courier_name == 'Leopards' or item.tracking_number[:2]|upper == 'LE' %}#0a5c6e{% else %}#3a3b45{% endif %};background:{% if item.courier_name == 'Leopards' or item.tracking_number[:2]|upper == 'LE' %}#e6f6f8{% else %}#e8eaef{% endif %};padding:2px 6px;border-radius:3px;text-decoration:none;white-space:nowrap;">{% if item.courier_name == 'Leopards' or item.tracking_number[:2]|upper == 'LE' %}Leopards · {% endif %}{{ item.tracking_number }}</a>
             {% endif %}
             {{ status_badge(item.status) }}
-            {% if item.is_postex %}
-            <span class="payment-chip {% if item.postex_payment_status and item.postex_payment_status.settled %}settled{% endif %}">
-              {% if item.postex_payment_status and item.postex_payment_status.settled %}Paid PostEx{% elif item.postex_payment_status and not item.postex_payment_status.error %}COD Pending{% else %}Payment unknown{% endif %}
-            </span>
-            {% endif %}
           </div>
           {% endfor %}
         </div><!-- /mobile-detail -->
@@ -532,38 +498,6 @@
       <div style="text-align:center;padding:40px 0;color:#858796;font-size:13px;">No orders loaded yet. Data refreshes 30 seconds after startup.</div>
       {% endfor %}
     </div><!-- /shopifyOrderList -->
-      </div><!-- /orders-column -->
-
-      <aside class="payments-panel" aria-label="PostEx pending payments">
-        <div class="payments-head">
-          <div class="payments-label">COD Receivable</div>
-          <div class="payments-amount">PKR {{ postex_payment_summary.pending_amount|float|int|format_number }}</div>
-          <div class="payments-sub">
-            {{ postex_payment_summary.pending_count }} pending PostEx order{{ '' if postex_payment_summary.pending_count == 1 else 's' }}
-            {% if not postex_payment_summary.token_configured %}<br>POSTEX_TOKEN is not configured.{% endif %}
-          </div>
-        </div>
-        <div class="payments-list">
-          {% for pending in postex_payment_summary.pending_orders[:20] %}
-          <a class="payment-row" href="{{ pending.order_link or '#' }}" target="_blank">
-            <div>
-              <div class="payment-order">#{{ pending.order_id }}</div>
-              <div class="payment-meta">
-                {{ pending.customer_name or 'No customer' }}{% if pending.customer_city %} • {{ pending.customer_city }}{% endif %}
-                {% if pending.tracking_numbers %}<br>{{ pending.tracking_numbers|join(', ') }}{% endif %}
-              </div>
-              <span class="payment-chip">PostEx pending</span>
-            </div>
-            <div class="payment-amount">PKR {{ pending.amount|float|int|format_number }}</div>
-          </a>
-          {% else %}
-          <div class="payment-empty">
-            No pending PostEx receivables found.
-          </div>
-          {% endfor %}
-        </div>
-      </aside>
-    </div><!-- /tracking-content-grid -->
   </div><!-- /mainScroll -->
 
   <!-- Bottom bar -->
@@ -773,7 +707,6 @@ function renderStats() {
   const counts = {}, totals = {};
   const unpaidTotals = { Delivered: 0, 'Un-Booked': 0, 'Need Attention': 0, Booked: 0 };
   let grandTotal = 0;
-  let codReceivable = 0;
   ORDER_DATA.forEach(o => {
     const s = normalizeStatusBucket(o.status);
     const attention = orderNeedsAttention(o);
@@ -782,7 +715,6 @@ function renderStats() {
     counts[statBucket] = (counts[statBucket] || 0) + 1;
     totals[statBucket] = (totals[statBucket] || 0) + amount;
     grandTotal += amount;
-    codReceivable += Number(o.postex_payment_pending_amount || 0);
     if (isUnpaidOrder(o)) {
       if (statBucket === 'Delivered') unpaidTotals.Delivered += amount;
       if (statBucket === 'Un-Booked') unpaidTotals['Un-Booked'] += amount;
@@ -849,11 +781,6 @@ function renderStats() {
       <span class="stat-lbl">Booked</span>
     </div>
     <div class="stat-div"></div>
-    <div class="stat">
-      <span class="stat-val" style="color:#d4a800;font-size:13px">${fmtFull(codReceivable)}</span>
-      <span class="stat-pkr">COD</span>
-      <span class="stat-lbl">Receivable</span>
-    </div>
     <div class="stat">
       <span class="stat-val" style="color:#d4a800;font-size:13px">${Math.round(grandTotal).toLocaleString('en-PK')}</span>
       <span class="stat-pkr">&nbsp;</span>

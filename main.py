@@ -8,7 +8,7 @@ import smtplib
 import sys
 import threading
 import time
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.mime.text import MIMEText
 from urllib.parse import urlparse
 
@@ -737,74 +737,145 @@ def get_postex_payment_status_cache_only(tracking_number):
     return postex_payment_status_cache.get(tracking_number.upper())
 
 
-def annotate_orders_with_postex_payments(orders):
+POSTEX_ORDER_STATUSES = {
+    0: "All Orders",
+    1: "Unbooked",
+    2: "Booked",
+    3: "PostEx WareHouse",
+    4: "Out For Delivery",
+    5: "Delivered",
+    6: "Returned",
+    7: "Un-Assigned By Me",
+    8: "Expired",
+    9: "Delivery Under Review",
+    15: "Picked By PostEx",
+    16: "Out For Return",
+    17: "Attempted",
+    18: "En-Route to PostEx warehouse",
+}
+
+
+def parse_iso_date(value, default_date):
+    raw = str(value or "").strip()
+    if not raw:
+        return default_date
+    try:
+        return datetime.strptime(raw[:10], "%Y-%m-%d").date()
+    except ValueError:
+        return default_date
+
+
+def fetch_postex_orders(order_status_id, start_date, end_date):
+    token = get_postex_token()
+    if not token:
+        raise RuntimeError("POSTEX_TOKEN is not configured.")
+    url = "https://api.postex.pk/services/integration/api/order/v1/get-all-order"
+    headers = {"token": token}
+    primary_params = {
+        "orderStatusID": int(order_status_id),
+        "fromDate": start_date.isoformat(),
+        "toDate": end_date.isoformat(),
+    }
+    response = requests.get(url, headers=headers, params=primary_params, timeout=30)
+    if response.status_code >= 400:
+        fallback_params = {
+            "orderStatusId": int(order_status_id),
+            "startDate": start_date.isoformat(),
+            "endDate": end_date.isoformat(),
+        }
+        response = requests.get(url, headers=headers, params=fallback_params, timeout=30)
+    response.raise_for_status()
+    payload = response.json()
+    if not isinstance(payload, dict):
+        return []
+    dist = payload.get("dist") or []
+    return dist if isinstance(dist, list) else []
+
+
+def extract_postex_tracking_response(entry):
+    if not isinstance(entry, dict):
+        return {}
+    response = entry.get("trackingResponse")
+    if isinstance(response, dict):
+        return response
+    return entry
+
+
+def build_postex_payments_page_data(order_status_id, start_date, end_date):
+    orders = fetch_postex_orders(order_status_id, start_date, end_date)
     tracking_numbers = []
-    for order in orders or []:
-        for item in order.get("line_items", []) or []:
-            tracking_number = str(item.get("tracking_number") or "").strip()
-            if is_postex_tracking(tracking_number, item.get("courier_name")):
-                tracking_numbers.append(tracking_number)
-    refresh_postex_payment_statuses_sync(tracking_numbers)
-    for order in orders or []:
-        order_pending_amount = 0.0
-        order_settled_amount = 0.0
-        order_has_postex = False
-        for item in order.get("line_items", []) or []:
-            tracking_number = str(item.get("tracking_number") or "").strip()
-            is_postex = is_postex_tracking(tracking_number, item.get("courier_name"))
-            item["is_postex"] = is_postex
-            if not is_postex:
-                continue
-            order_has_postex = True
-            payment_status = get_postex_payment_status_cache_only(tracking_number) or {}
-            item["postex_payment_status"] = payment_status
-            if not payment_status or payment_status.get("error"):
-                continue
-            line_total = parse_money(item.get("line_total", 0))
-            if payment_status.get("settled"):
-                order_settled_amount += line_total
-            else:
-                order_pending_amount += line_total
-        order["postex_payment_pending_amount"] = round(order_pending_amount, 2)
-        order["postex_payment_settled_amount"] = round(order_settled_amount, 2)
-        order["has_postex_payment_pending"] = bool(order_pending_amount)
-        order["has_postex"] = order_has_postex
-    return orders
+    rows = []
+    for entry in orders:
+        data = extract_postex_tracking_response(entry)
+        tracking_number = str(data.get("trackingNumber") or entry.get("trackingNumber") or "").strip()
+        if tracking_number:
+            tracking_numbers.append(tracking_number)
 
+    refresh_postex_payment_statuses_sync(tracking_numbers, ttl_seconds=900)
 
-def build_postex_payment_summary(orders):
-    pending_orders = []
-    total_pending = 0.0
-    total_settled = 0.0
-    for order in orders or []:
-        pending_amount = parse_money(order.get("postex_payment_pending_amount", 0))
-        settled_amount = parse_money(order.get("postex_payment_settled_amount", 0))
-        total_pending += pending_amount
-        total_settled += settled_amount
-        if pending_amount <= 0:
+    summary = {
+        "orders": 0,
+        "invoice_payment": 0.0,
+        "shipping_fee": 0.0,
+        "delivered_tax": 0.0,
+        "net_receivable": 0.0,
+        "pending_receivable": 0.0,
+        "paid_receivable": 0.0,
+    }
+
+    for entry in orders:
+        data = extract_postex_tracking_response(entry)
+        tracking_number = str(data.get("trackingNumber") or entry.get("trackingNumber") or "").strip()
+        if not tracking_number:
             continue
-        customer = order.get("customer_details") or {}
-        pending_orders.append(
-            {
-                "order_id": order.get("order_id"),
-                "shopify_id": order.get("id"),
-                "order_link": order.get("order_link"),
-                "customer_name": customer.get("name", ""),
-                "customer_city": customer.get("city", ""),
-                "amount": pending_amount,
-                "tracking_numbers": [
-                    item.get("tracking_number")
-                    for item in order.get("line_items", [])
-                    if item.get("is_postex") and not (item.get("postex_payment_status") or {}).get("settled")
-                ],
-            }
-        )
-    pending_orders.sort(key=lambda row: parse_money(row.get("amount", 0)), reverse=True)
+        invoice_payment = parse_money(data.get("invoicePayment", 0))
+        transaction_fee = parse_money(data.get("transactionFee", 0))
+        transaction_tax = parse_money(data.get("transactionTax", 0))
+        shipping_fee = round(transaction_fee + transaction_tax, 2)
+        transaction_status = str(data.get("transactionStatus") or "").strip()
+        is_delivered = int(order_status_id) == 5 or "delivered" in transaction_status.lower()
+        delivered_tax = round(invoice_payment * 0.04, 2) if is_delivered else 0.0
+        net_receivable = round(invoice_payment - shipping_fee - delivered_tax, 2)
+        payment_status = get_postex_payment_status_cache_only(tracking_number) or {}
+        is_paid = bool(payment_status.get("settled"))
+        status_label = "Paid" if is_paid else "Pending"
+        if payment_status.get("error"):
+            status_label = "Unknown"
+        row = {
+            "order_id": str(data.get("orderRefNumber") or "").strip(),
+            "tracking_number": tracking_number,
+            "product": str(data.get("orderDetail") or "").strip(),
+            "invoice_payment": invoice_payment,
+            "shipping_fee": shipping_fee,
+            "delivered_tax": delivered_tax,
+            "net_receivable": net_receivable,
+            "payment_status": status_label,
+            "settlement_date": payment_status.get("settlement_date") or "",
+            "transaction_status": transaction_status,
+        }
+        rows.append(row)
+
+        summary["orders"] += 1
+        summary["invoice_payment"] += invoice_payment
+        summary["shipping_fee"] += shipping_fee
+        summary["delivered_tax"] += delivered_tax
+        summary["net_receivable"] += net_receivable
+        if is_paid:
+            summary["paid_receivable"] += net_receivable
+        elif status_label == "Pending":
+            summary["pending_receivable"] += net_receivable
+
+    for key in ("invoice_payment", "shipping_fee", "delivered_tax", "net_receivable", "pending_receivable", "paid_receivable"):
+        summary[key] = round(summary[key], 2)
+
+    rows.sort(key=lambda item: (item["payment_status"] != "Pending", -parse_money(item["net_receivable"])))
     return {
-        "pending_amount": round(total_pending, 2),
-        "settled_amount": round(total_settled, 2),
-        "pending_count": len(pending_orders),
-        "pending_orders": pending_orders,
+        "rows": rows,
+        "summary": summary,
+        "statuses": POSTEX_ORDER_STATUSES,
+        "selected_status": int(order_status_id),
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
         "token_configured": bool(get_postex_token()),
     }
 
@@ -2175,6 +2246,7 @@ def build_admin_mobile_sections():
         },
         {"id": "scanner", "label": "Scanner", "icon": "🔍", "src": "/employee_portal"},
         {"id": "employee-orders", "label": "Orders", "icon": "🧾", "src": "/employee_portal/orders"},
+        {"id": "postex-payments", "label": "PostEx Payments", "icon": "💰", "src": "/postex-payments?embedded=1"},
         {"id": "pending", "label": "Pending", "icon": "📋", "src": "/pending?embedded=1"},
         {"id": "accounts", "label": "Accounts", "icon": "💼", "src": "/accounts?embedded=1"},
         {"id": "undelivered", "label": "Undelivered", "icon": "🚚", "src": "/undelivered?embedded=1"},
@@ -2296,14 +2368,11 @@ def mark_paid_archive():
 
 @app.route("/")
 def tracking():
-    annotate_orders_with_postex_payments(order_details)
-    postex_payment_summary = build_postex_payment_summary(order_details)
     return render_template(
         "track.html",
         order_details=order_details,
         darazOrders=[],
         employee_approvals=build_employee_approval_items(),
-        postex_payment_summary=postex_payment_summary,
     )
 
 
@@ -2311,7 +2380,6 @@ def tracking():
 def refresh_data():
     try:
         refreshed_all = reload_orders(preserve_existing_on_partial=True)
-        annotate_orders_with_postex_payments(order_details)
         if request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.is_json:
             message = "Data refreshed successfully" if refreshed_all else "Tracking refreshed; existing order cache preserved"
             return jsonify({"message": message})
@@ -2320,7 +2388,6 @@ def refresh_data():
             order_details=order_details,
             darazOrders=[],
             employee_approvals=build_employee_approval_items(),
-            postex_payment_summary=build_postex_payment_summary(order_details),
         )
     except Exception as error:
         return jsonify({"message": f"Failed to refresh data: {error}"}), 500
@@ -2349,6 +2416,53 @@ def tracking_summary(tracking_num):
 def pending_orders():
     all_orders, pending_items, summary = build_pending_items_table_data()
     return render_template("pending.html", all_orders=all_orders, pending_items=pending_items, summary=summary)
+
+
+@app.route("/postex-payments")
+def postex_payments():
+    if not admin_portal_is_authenticated():
+        return redirect(url_for("admin_portal", section="postex-payments"))
+
+    today = datetime.now().date()
+    default_start = today - timedelta(days=30)
+    start_date = parse_iso_date(request.args.get("startDate") or request.args.get("start_date"), default_start)
+    end_date = parse_iso_date(request.args.get("endDate") or request.args.get("end_date"), today)
+    if start_date > end_date:
+        start_date, end_date = end_date, start_date
+    try:
+        order_status_id = int(request.args.get("orderStatusId") or request.args.get("order_status_id") or 5)
+    except (TypeError, ValueError):
+        order_status_id = 5
+    if order_status_id not in POSTEX_ORDER_STATUSES:
+        order_status_id = 5
+
+    error_message = ""
+    data = {
+        "rows": [],
+        "summary": {
+            "orders": 0,
+            "invoice_payment": 0.0,
+            "shipping_fee": 0.0,
+            "delivered_tax": 0.0,
+            "net_receivable": 0.0,
+            "pending_receivable": 0.0,
+            "paid_receivable": 0.0,
+        },
+        "statuses": POSTEX_ORDER_STATUSES,
+        "selected_status": order_status_id,
+        "start_date": start_date.isoformat(),
+        "end_date": end_date.isoformat(),
+        "token_configured": bool(get_postex_token()),
+    }
+    try:
+        if data["token_configured"]:
+            data = build_postex_payments_page_data(order_status_id, start_date, end_date)
+        else:
+            error_message = "POSTEX_TOKEN is not configured."
+    except Exception as error:
+        error_message = str(error)
+
+    return render_template("postex_payments.html", data=data, error_message=error_message)
 
 
 @app.route("/product-costs")
