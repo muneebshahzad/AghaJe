@@ -11,7 +11,7 @@
   .pay-field { display:flex; flex-direction:column; gap:5px; }
   .pay-field label { font-size:10px; font-weight:800; color:#858796; text-transform:uppercase; letter-spacing:.05em; }
   .pay-input { height:36px; border:1px solid #d8dcea; border-radius:8px; padding:0 10px; font-family:'DM Sans', sans-serif; font-size:12px; color:#2d2e36; background:#fff; }
-  .pay-summary { display:grid; grid-template-columns:repeat(5, minmax(145px, 1fr)); gap:10px; margin-bottom:14px; }
+  .pay-summary { display:grid; grid-template-columns:repeat(auto-fit, minmax(145px, 1fr)); gap:10px; margin-bottom:14px; }
   .pay-card { background:#fff; border:1px solid #e3e6f0; border-radius:12px; padding:13px 14px; box-shadow:0 1px 5px rgba(0,0,0,.04); }
   .pay-card-label { font-size:10px; font-weight:800; color:#858796; text-transform:uppercase; letter-spacing:.05em; }
   .pay-card-value { margin-top:5px; font-family:'DM Mono', monospace; font-size:18px; font-weight:800; color:#2d2e36; }
@@ -43,7 +43,7 @@
   <div class="pay-head">
     <div>
       <div class="pay-title">PostEx Payments</div>
-      <div class="pay-sub">Receivables are calculated from PostEx delivered order data, not Shopify totals.</div>
+      <div class="pay-sub">Delivered receivables and returned shipment charges are calculated from PostEx order data, not Shopify totals.</div>
     </div>
     <form class="pay-filters" method="get">
       <input type="hidden" name="embedded" value="{{ '1' if embedded_mode else '' }}">
@@ -76,6 +76,14 @@
       <div class="pay-card-label">Pending Receivable</div>
       <div class="pay-card-value">PKR {{ data.summary.pending_receivable|float|round|int|format_number }}</div>
     </div>
+    <div class="pay-card deduct">
+      <div class="pay-card-label">Pending Return Charges</div>
+      <div class="pay-card-value">PKR {{ data.summary.pending_payable|float|round|int|format_number }}</div>
+    </div>
+    <div class="pay-card deduct">
+      <div class="pay-card-label">Paid Return Charges</div>
+      <div class="pay-card-value">PKR {{ data.summary.paid_payable|float|round|int|format_number }}</div>
+    </div>
     <div class="pay-card paid">
       <div class="pay-card-label">Paid Receivable</div>
       <div class="pay-card-value">PKR {{ data.summary.paid_receivable|float|round|int|format_number }}</div>
@@ -103,7 +111,7 @@
           <th>Product</th>
           <th class="money">Shipping Fee</th>
           <th class="money">4% Tax</th>
-          <th class="money">Net Receivable</th>
+          <th class="money">Net Receivable / Payable</th>
           <th>Payment Status</th>
         </tr>
       </thead>
@@ -115,9 +123,10 @@
           <td><div class="pay-product">{{ row.product or 'No product detail' }}</div></td>
           <td class="pay-money money">PKR {{ row.shipping_fee|float|round|int|format_number }}</td>
           <td class="pay-money money">PKR {{ row.delivered_tax|float|round|int|format_number }}</td>
-          <td class="pay-money money">PKR {{ row.net_receivable|float|round|int|format_number }}</td>
+          <td class="pay-money money">{% if row.net_receivable < 0 %}-{% endif %}PKR {{ row.net_receivable|abs|float|round|int|format_number }}</td>
           <td>
             <span class="pay-status {{ row.payment_status|lower }}">{{ row.payment_status }}</span>
+            {% if row.is_returned %}<div style="font-size:10px;color:#e74a3b;margin-top:4px;">Return charge</div>{% endif %}
             {% if row.settlement_date %}<div style="font-size:10px;color:#858796;margin-top:4px;">{{ row.settlement_date }}</div>{% endif %}
           </td>
         </tr>

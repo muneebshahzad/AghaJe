@@ -821,6 +821,8 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
         "net_receivable": 0.0,
         "pending_receivable": 0.0,
         "paid_receivable": 0.0,
+        "pending_payable": 0.0,
+        "paid_payable": 0.0,
     }
 
     for entry in orders:
@@ -831,11 +833,18 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
         invoice_payment = parse_money(data.get("invoicePayment", 0))
         transaction_fee = parse_money(data.get("transactionFee", 0))
         transaction_tax = parse_money(data.get("transactionTax", 0))
-        shipping_fee = round(transaction_fee + transaction_tax, 2)
+        reversal_fee = parse_money(data.get("reversalFee", 0))
+        reversal_tax = parse_money(data.get("reversalTax", 0))
         transaction_status = str(data.get("transactionStatus") or "").strip()
+        normalized_transaction_status = transaction_status.lower()
         is_delivered = int(order_status_id) == 5 or "delivered" in transaction_status.lower()
+        is_returned = int(order_status_id) in {6, 16} or "return" in normalized_transaction_status
+        if is_returned:
+            shipping_fee = round(reversal_fee + reversal_tax, 2)
+        else:
+            shipping_fee = round(transaction_fee + transaction_tax, 2)
         delivered_tax = round(invoice_payment * 0.04, 2) if is_delivered else 0.0
-        net_receivable = round(invoice_payment - shipping_fee - delivered_tax, 2)
+        net_receivable = round(-shipping_fee, 2) if is_returned else round(invoice_payment - shipping_fee - delivered_tax, 2)
         payment_status = get_postex_payment_status_cache_only(tracking_number) or {}
         is_paid = bool(payment_status.get("settled"))
         status_label = "Paid" if is_paid else "Pending"
@@ -852,6 +861,7 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
             "payment_status": status_label,
             "settlement_date": payment_status.get("settlement_date") or "",
             "transaction_status": transaction_status,
+            "is_returned": is_returned,
         }
         rows.append(row)
 
@@ -860,12 +870,26 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
         summary["shipping_fee"] += shipping_fee
         summary["delivered_tax"] += delivered_tax
         summary["net_receivable"] += net_receivable
-        if is_paid:
+        if is_returned:
+            if is_paid:
+                summary["paid_payable"] += shipping_fee
+            elif status_label == "Pending":
+                summary["pending_payable"] += shipping_fee
+        elif is_paid:
             summary["paid_receivable"] += net_receivable
         elif status_label == "Pending":
             summary["pending_receivable"] += net_receivable
 
-    for key in ("invoice_payment", "shipping_fee", "delivered_tax", "net_receivable", "pending_receivable", "paid_receivable"):
+    for key in (
+        "invoice_payment",
+        "shipping_fee",
+        "delivered_tax",
+        "net_receivable",
+        "pending_receivable",
+        "paid_receivable",
+        "pending_payable",
+        "paid_payable",
+    ):
         summary[key] = round(summary[key], 2)
 
     rows.sort(key=lambda item: (item["payment_status"] != "Pending", -parse_money(item["net_receivable"])))
