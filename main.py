@@ -64,9 +64,12 @@ ADMIN_PORTAL_PASSWORD = os.getenv("ADMIN_PORTAL_PASSWORD", "security")
 order_details = []
 product_image_cache = {}
 tracking_summary_cache = {}
+postex_payment_status_cache = {}
+postex_payment_status_cache_loaded = False
 RATE_LIMIT = 2
 LAST_REQUEST_TIME = 0.0
 PRODUCT_COSTS_SETTING_KEY = "product_cost_overrides_v1"
+POSTEX_PAYMENT_STATUS_CACHE_SETTING_KEY = "postex_payment_status_cache_v1"
 inventory_item_cost_cache = {}
 
 _TAG_STYLES = {
@@ -83,9 +86,25 @@ def is_leopards_tracking(tracking_number):
     return str(tracking_number or "").strip().upper().startswith("LE")
 
 
+def is_postex_courier(courier_name=""):
+    normalized = str(courier_name or "").strip().lower().replace(" ", "").replace("-", "")
+    return "postex" in normalized
+
+
+def is_postex_tracking(tracking_number="", courier_name=""):
+    tracking = str(tracking_number or "").strip().upper()
+    if not tracking or tracking == "N/A":
+        return False
+    if is_postex_courier(courier_name):
+        return True
+    return tracking.startswith("CX") or (tracking.isdigit() and tracking.startswith("2") and len(tracking) >= 10)
+
+
 def courier_label_for_tracking(courier_name="", tracking_number=""):
     if is_leopards_tracking(tracking_number):
         return "Leopards"
+    if is_postex_courier(courier_name) or is_postex_tracking(tracking_number):
+        return "PostEx"
     return str(courier_name or "").strip()
 
 
@@ -561,6 +580,235 @@ def get_tracking_summary_cache_only(tracking_number):
     return cached.get("summary") if cached else None
 
 
+def get_postex_token():
+    return (
+        os.getenv("POSTEX_TOKEN")
+        or os.getenv("POSTEX_API_TOKEN")
+        or os.getenv("POSTEX_AUTH_TOKEN")
+        or ""
+    ).strip()
+
+
+def normalize_postex_payment_cache_entry(entry):
+    if not isinstance(entry, dict):
+        return None
+    dist = entry.get("dist") if isinstance(entry.get("dist"), dict) else {}
+    status = str(entry.get("status") or entry.get("statusMessage") or "").strip()
+    tracking_number = str(entry.get("tracking_number") or dist.get("trackingNumber") or "").strip()
+    if not tracking_number:
+        return None
+    try:
+        fetched_at = float(entry.get("fetched_at") or time.time())
+    except (TypeError, ValueError):
+        fetched_at = time.time()
+    return {
+        "fetched_at": fetched_at,
+        "tracking_number": tracking_number,
+        "settled": bool(entry.get("settled")),
+        "status": status,
+        "settlement_date": str(entry.get("settlement_date") or dist.get("settlementDate") or "").strip(),
+        "upfront_payment_date": str(entry.get("upfront_payment_date") or dist.get("upfrontPaymentDate") or "").strip(),
+        "reserve_payment_date": str(entry.get("reserve_payment_date") or dist.get("reservePaymentDate") or "").strip(),
+        "order_ref_number": str(entry.get("order_ref_number") or dist.get("orderRefNumber") or "").strip(),
+        "error": str(entry.get("error") or "").strip(),
+    }
+
+
+def load_persisted_postex_payment_status_cache():
+    raw = get_app_setting(POSTEX_PAYMENT_STATUS_CACHE_SETTING_KEY, "{}")
+    try:
+        payload = json.loads(raw or "{}")
+    except (TypeError, ValueError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    loaded = {}
+    for tracking_number, entry in payload.items():
+        key = str(tracking_number or "").strip().upper()
+        normalized = normalize_postex_payment_cache_entry(entry)
+        if key and normalized:
+            loaded[key] = normalized
+    return loaded
+
+
+def ensure_postex_payment_status_cache_loaded():
+    global postex_payment_status_cache_loaded
+    if postex_payment_status_cache_loaded:
+        return
+    persisted = load_persisted_postex_payment_status_cache()
+    if persisted:
+        postex_payment_status_cache.update(persisted)
+    postex_payment_status_cache_loaded = True
+
+
+def persist_postex_payment_status_cache():
+    payload = {
+        key: entry
+        for key, entry in postex_payment_status_cache.items()
+        if normalize_postex_payment_cache_entry(entry)
+    }
+    return set_app_setting(POSTEX_PAYMENT_STATUS_CACHE_SETTING_KEY, json.dumps(payload))
+
+
+async def fetch_postex_payment_status(session_obj, tracking_number):
+    token = get_postex_token()
+    if not token:
+        raise RuntimeError("POSTEX_TOKEN is not configured.")
+    tracking_number = str(tracking_number or "").strip()
+    url = f"https://api.postex.pk/services/integration/api/order/v1/payment-status/{tracking_number}"
+    async with session_obj.get(url, headers={"token": token}) as response:
+        payload = await response.json(content_type=None)
+        if response.status == 404:
+            return {
+                "tracking_number": tracking_number,
+                "settled": False,
+                "status": "Order Not Found",
+                "error": "Order Not Found",
+            }
+        response.raise_for_status()
+        dist = payload.get("dist") if isinstance(payload, dict) else {}
+        dist = dist if isinstance(dist, dict) else {}
+        return {
+            "tracking_number": str(dist.get("trackingNumber") or tracking_number).strip(),
+            "settled": bool(dist.get("settle")),
+            "status": str((payload or {}).get("statusMessage") or "").strip(),
+            "settlement_date": str(dist.get("settlementDate") or "").strip(),
+            "upfront_payment_date": str(dist.get("upfrontPaymentDate") or "").strip(),
+            "reserve_payment_date": str(dist.get("reservePaymentDate") or "").strip(),
+            "order_ref_number": str(dist.get("orderRefNumber") or "").strip(),
+            "error": "",
+        }
+
+
+def refresh_postex_payment_statuses_sync(tracking_numbers, ttl_seconds=3600):
+    ensure_postex_payment_status_cache_loaded()
+    unique_numbers = []
+    seen = set()
+    now = time.time()
+    for tracking_number in tracking_numbers:
+        tracking_number = str(tracking_number or "").strip()
+        if not is_postex_tracking(tracking_number):
+            continue
+        key = tracking_number.upper()
+        if key in seen:
+            continue
+        seen.add(key)
+        cached = postex_payment_status_cache.get(key)
+        if cached and now - cached.get("fetched_at", 0) < ttl_seconds:
+            continue
+        unique_numbers.append(tracking_number)
+
+    async def refresh_all():
+        timeout = aiohttp.ClientTimeout(total=12)
+        semaphore = asyncio.Semaphore(6)
+        updates = {}
+        async with aiohttp.ClientSession(timeout=timeout) as session_obj:
+            async def refresh_one(tracking_number):
+                async with semaphore:
+                    try:
+                        status = await fetch_postex_payment_status(session_obj, tracking_number)
+                    except Exception as error:
+                        print(f"Could not refresh PostEx payment status for {tracking_number}: {error}")
+                        status = {
+                            "tracking_number": tracking_number,
+                            "settled": False,
+                            "status": "",
+                            "error": str(error),
+                        }
+                    status["fetched_at"] = time.time()
+                    updates[tracking_number.upper()] = status
+
+            await asyncio.gather(*(refresh_one(number) for number in unique_numbers))
+        return updates
+
+    if unique_numbers and get_postex_token():
+        updates = asyncio.run(refresh_all())
+        if updates:
+            postex_payment_status_cache.update(updates)
+            persist_postex_payment_status_cache()
+    return len(unique_numbers)
+
+
+def get_postex_payment_status_cache_only(tracking_number):
+    tracking_number = str(tracking_number or "").strip()
+    if not tracking_number:
+        return None
+    ensure_postex_payment_status_cache_loaded()
+    return postex_payment_status_cache.get(tracking_number.upper())
+
+
+def annotate_orders_with_postex_payments(orders):
+    tracking_numbers = []
+    for order in orders or []:
+        for item in order.get("line_items", []) or []:
+            tracking_number = str(item.get("tracking_number") or "").strip()
+            if is_postex_tracking(tracking_number, item.get("courier_name")):
+                tracking_numbers.append(tracking_number)
+    refresh_postex_payment_statuses_sync(tracking_numbers)
+    for order in orders or []:
+        order_pending_amount = 0.0
+        order_settled_amount = 0.0
+        order_has_postex = False
+        for item in order.get("line_items", []) or []:
+            tracking_number = str(item.get("tracking_number") or "").strip()
+            is_postex = is_postex_tracking(tracking_number, item.get("courier_name"))
+            item["is_postex"] = is_postex
+            if not is_postex:
+                continue
+            order_has_postex = True
+            payment_status = get_postex_payment_status_cache_only(tracking_number) or {}
+            item["postex_payment_status"] = payment_status
+            if not payment_status or payment_status.get("error"):
+                continue
+            line_total = parse_money(item.get("line_total", 0))
+            if payment_status.get("settled"):
+                order_settled_amount += line_total
+            else:
+                order_pending_amount += line_total
+        order["postex_payment_pending_amount"] = round(order_pending_amount, 2)
+        order["postex_payment_settled_amount"] = round(order_settled_amount, 2)
+        order["has_postex_payment_pending"] = bool(order_pending_amount)
+        order["has_postex"] = order_has_postex
+    return orders
+
+
+def build_postex_payment_summary(orders):
+    pending_orders = []
+    total_pending = 0.0
+    total_settled = 0.0
+    for order in orders or []:
+        pending_amount = parse_money(order.get("postex_payment_pending_amount", 0))
+        settled_amount = parse_money(order.get("postex_payment_settled_amount", 0))
+        total_pending += pending_amount
+        total_settled += settled_amount
+        if pending_amount <= 0:
+            continue
+        customer = order.get("customer_details") or {}
+        pending_orders.append(
+            {
+                "order_id": order.get("order_id"),
+                "shopify_id": order.get("id"),
+                "order_link": order.get("order_link"),
+                "customer_name": customer.get("name", ""),
+                "customer_city": customer.get("city", ""),
+                "amount": pending_amount,
+                "tracking_numbers": [
+                    item.get("tracking_number")
+                    for item in order.get("line_items", [])
+                    if item.get("is_postex") and not (item.get("postex_payment_status") or {}).get("settled")
+                ],
+            }
+        )
+    pending_orders.sort(key=lambda row: parse_money(row.get("amount", 0)), reverse=True)
+    return {
+        "pending_amount": round(total_pending, 2),
+        "settled_amount": round(total_settled, 2),
+        "pending_count": len(pending_orders),
+        "pending_orders": pending_orders,
+        "token_configured": bool(get_postex_token()),
+    }
+
+
 def refresh_tracking_summaries_sync(tracking_numbers):
     unique_numbers = []
     seen = set()
@@ -767,6 +1015,7 @@ async def process_line_item(session_obj, line_item, fulfillments):
                 if getattr(item, "id", None) != getattr(line_item, "id", None):
                     continue
                 tracking_number = getattr(fulfillment, "tracking_number", "") or "N/A"
+                courier_name = courier_label_for_tracking(getattr(fulfillment, "tracking_company", ""), tracking_number) or "Call Courier"
                 try:
                     data = await fetch_tracking_data(session_obj, tracking_number)
                 except Exception as error:
@@ -776,7 +1025,7 @@ async def process_line_item(session_obj, line_item, fulfillments):
                 tracking_info.append(
                     {
                         "tracking_number": tracking_number,
-                        "courier_name": courier_label_for_tracking("", tracking_number) or "Call Courier",
+                        "courier_name": courier_name,
                         "status": summary["status"],
                         "quantity": getattr(item, "quantity", getattr(line_item, "quantity", 1)),
                         "name": summary["name"],
@@ -2047,11 +2296,14 @@ def mark_paid_archive():
 
 @app.route("/")
 def tracking():
+    annotate_orders_with_postex_payments(order_details)
+    postex_payment_summary = build_postex_payment_summary(order_details)
     return render_template(
         "track.html",
         order_details=order_details,
         darazOrders=[],
         employee_approvals=build_employee_approval_items(),
+        postex_payment_summary=postex_payment_summary,
     )
 
 
@@ -2059,10 +2311,17 @@ def tracking():
 def refresh_data():
     try:
         refreshed_all = reload_orders(preserve_existing_on_partial=True)
+        annotate_orders_with_postex_payments(order_details)
         if request.headers.get("X-Requested-With") == "XMLHttpRequest" or request.is_json:
             message = "Data refreshed successfully" if refreshed_all else "Tracking refreshed; existing order cache preserved"
             return jsonify({"message": message})
-        return render_template("track.html", order_details=order_details, darazOrders=[], employee_approvals=build_employee_approval_items())
+        return render_template(
+            "track.html",
+            order_details=order_details,
+            darazOrders=[],
+            employee_approvals=build_employee_approval_items(),
+            postex_payment_summary=build_postex_payment_summary(order_details),
+        )
     except Exception as error:
         return jsonify({"message": f"Failed to refresh data: {error}"}), 500
 
