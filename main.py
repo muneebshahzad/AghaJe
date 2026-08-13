@@ -965,16 +965,22 @@ def apply_tracking_summary_to_order_cache(tracking_number, summary):
     normalized = normalize_scan_term(tracking_number)
     updated = 0
     status = summary.get("status") or "Booked"
+
+    def maybe_fill_customer_field(item, field):
+        current = str(item.get(field) or "").strip()
+        candidate = str(summary.get(field) or "").strip()
+        if current or not candidate or candidate in {"-", "N/A"}:
+            return
+        item[field] = candidate
+
     for order in order_details:
         changed_order = False
         for item in order.get("line_items", []) or []:
             if normalize_scan_term(item.get("tracking_number")) != normalized:
                 continue
             item["status"] = status
-            item["name"] = summary.get("name") or item.get("name", "")
-            item["address"] = summary.get("address") or item.get("address", "")
-            item["city"] = summary.get("city") or item.get("city", "")
-            item["phone"] = summary.get("phone") or item.get("phone", "")
+            for field in ("name", "address", "city", "phone"):
+                maybe_fill_customer_field(item, field)
             changed_order = True
             updated += 1
         if changed_order:
