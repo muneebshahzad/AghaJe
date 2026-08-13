@@ -119,6 +119,13 @@ def normalize_scan_term(term):
     return (term or "").strip().lower().replace("#", "")
 
 
+def clean_customer_value(value):
+    text = str(value or "").strip()
+    if not text or text.upper() in {"-", "N/A", "NULL", "NONE"}:
+        return ""
+    return text
+
+
 def is_lahore_city(city):
     normalized = (city or "").strip().lower()
     return "lahore" in normalized or "lhr" in normalized
@@ -389,6 +396,7 @@ def inject_now():
         "now": datetime.now(),
         "skip_base_password_prompt": bool(session.get(ADMIN_PORTAL_SESSION_KEY)),
         "embedded_mode": request.args.get("embedded") == "1",
+        "customer_value": clean_customer_value,
     }
 
 
@@ -967,9 +975,9 @@ def apply_tracking_summary_to_order_cache(tracking_number, summary):
     status = summary.get("status") or "Booked"
 
     def maybe_fill_customer_field(item, field):
-        current = str(item.get(field) or "").strip()
-        candidate = str(summary.get(field) or "").strip()
-        if current or not candidate or candidate in {"-", "N/A"}:
+        current = clean_customer_value(item.get(field))
+        candidate = clean_customer_value(summary.get(field))
+        if current or not candidate:
             return
         item[field] = candidate
 
@@ -1088,6 +1096,20 @@ def refresh_active_tracking_for_dashboard():
     )
     start_tracking_summaries_background_refresh(tracking_numbers)
     return refreshed_count
+
+
+def repair_order_customer_cache(orders):
+    for order in orders or []:
+        customer = order.setdefault("customer_details", {})
+        for item in order.get("line_items", []) or []:
+            for field in ("name", "address", "city", "phone"):
+                item_value = clean_customer_value(item.get(field))
+                customer_value = clean_customer_value(customer.get(field))
+                if not customer_value and item_value:
+                    customer[field] = item_value
+                    customer_value = item_value
+                if not item_value and customer_value:
+                    item[field] = customer_value
 
 
 def ensure_required_shopify_webhooks():
@@ -1424,7 +1446,29 @@ def enrich_orders_with_protected_customer_data(orders):
             item["address"] = details.get("address") or item.get("address", "")
             item["city"] = details.get("city") or item.get("city", "")
             item["phone"] = details.get("phone") or item.get("phone", "")
+    repair_order_customer_cache(orders)
     return orders
+
+
+def order_has_customer_details(order):
+    customer = order.get("customer_details") or {}
+    if any(clean_customer_value(customer.get(field)) for field in ("name", "address", "city", "phone")):
+        return True
+    for item in order.get("line_items", []) or []:
+        if any(clean_customer_value(item.get(field)) for field in ("name", "address", "city", "phone")):
+            return True
+    return False
+
+
+def refill_missing_customer_details(orders):
+    missing_orders = [
+        order
+        for order in orders or []
+        if order.get("id") and not order_has_customer_details(order)
+    ]
+    if missing_orders:
+        enrich_orders_with_protected_customer_data(missing_orders)
+    repair_order_customer_cache(orders)
 
 
 def enrich_orders_with_shopify_costs(orders):
@@ -2537,7 +2581,10 @@ def mark_paid_archive():
 
 @app.route("/")
 def tracking():
+    refill_missing_customer_details(order_details)
+    repair_order_customer_cache(order_details)
     refresh_active_tracking_for_dashboard()
+    repair_order_customer_cache(order_details)
     return render_template(
         "track.html",
         order_details=order_details,

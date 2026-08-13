@@ -289,10 +289,11 @@
     <div style="padding:0 14px;display:flex;flex-direction:column;gap:10px;max-width:960px;" id="shopifyOrderList">
       {% for order in order_details %}
       {% set item0 = order.line_items[0] if order.line_items else {} %}
-      {% set name  = item0.get('name') or order.customer_details.get('name') or '' %}
-      {% set city  = item0.get('city') or order.customer_details.get('city') or '' %}
-      {% set phone = item0.get('phone') or order.customer_details.get('phone') or '' %}
-      {% set addr  = order.customer_details.get('address') or item0.get('address') or '' %}
+      {% set customer = order.customer_details or {} %}
+      {% set name  = customer_value(item0.get('name')) or customer_value(customer.get('name')) %}
+      {% set city  = customer_value(item0.get('city')) or customer_value(customer.get('city')) %}
+      {% set phone = customer_value(item0.get('phone')) or customer_value(customer.get('phone')) %}
+      {% set addr  = customer_value(customer.get('address')) or customer_value(item0.get('address')) %}
       {% set s = order.status or '' %}
       {% set wa_phone = phone | replace('+','') %}
 
