@@ -64,6 +64,7 @@ ADMIN_PORTAL_PASSWORD = os.getenv("ADMIN_PORTAL_PASSWORD", "security")
 order_details = []
 product_image_cache = {}
 tracking_summary_cache = {}
+tracking_refresh_lock = threading.Lock()
 postex_payment_status_cache = {}
 postex_payment_status_cache_loaded = False
 RATE_LIMIT = 2
@@ -71,6 +72,12 @@ LAST_REQUEST_TIME = 0.0
 PRODUCT_COSTS_SETTING_KEY = "product_cost_overrides_v1"
 POSTEX_PAYMENT_STATUS_CACHE_SETTING_KEY = "postex_payment_status_cache_v1"
 inventory_item_cost_cache = {}
+TRACKING_REFRESH_SYNC_LIMIT = int(os.getenv("TRACKING_REFRESH_SYNC_LIMIT", "24"))
+TRACKING_REFRESH_BACKGROUND_LIMIT = int(os.getenv("TRACKING_REFRESH_BACKGROUND_LIMIT", "250"))
+TRACKING_REFRESH_FRESH_SECONDS = int(os.getenv("TRACKING_REFRESH_FRESH_SECONDS", "1800"))
+TRACKING_REFRESH_SYNC_DEADLINE_SECONDS = float(os.getenv("TRACKING_REFRESH_SYNC_DEADLINE_SECONDS", "16"))
+TRACKING_REFRESH_BACKGROUND_DEADLINE_SECONDS = float(os.getenv("TRACKING_REFRESH_BACKGROUND_DEADLINE_SECONDS", "90"))
+TRACKING_REFRESH_PER_SHIPMENT_TIMEOUT_SECONDS = float(os.getenv("TRACKING_REFRESH_PER_SHIPMENT_TIMEOUT_SECONDS", "8"))
 
 _TAG_STYLES = {
     "Call Courier": "background:#ede7f6;color:#4527a0",
@@ -526,6 +533,7 @@ def fetch_tracking_data_sync(tracking_number):
 def build_tracking_summary_payload(tracking_number):
     data = fetch_tracking_data_sync(tracking_number)
     summary = summarize_tracking_result(tracking_number, data)
+    remember_tracking_summary(tracking_number, summary)
     events = []
     if is_leopards_tracking(tracking_number):
         packet_list = (data or {}).get("packet_list") or []
@@ -920,7 +928,7 @@ def build_postex_payments_page_data(order_status_id, start_date, end_date):
     }
 
 
-def refresh_tracking_summaries_sync(tracking_numbers):
+def normalize_tracking_numbers(tracking_numbers):
     unique_numbers = []
     seen = set()
     for tracking_number in tracking_numbers:
@@ -932,33 +940,148 @@ def refresh_tracking_summaries_sync(tracking_numbers):
             continue
         seen.add(key)
         unique_numbers.append(tracking_number)
+    return unique_numbers
+
+
+def is_final_tracking_status(status):
+    normalized = normalize_status_bucket(status)
+    upper = str(status or "").strip().upper()
+    return normalized == "Delivered" or normalized == "RETURNED TO SHIPPER" or upper in {"RETURNED", "RETURN"}
+
+
+def active_tracking_numbers_from_orders(orders):
+    return normalize_tracking_numbers(
+        item.get("tracking_number")
+        for order in orders or []
+        for item in order.get("line_items", []) or []
+        if not is_final_tracking_status(item.get("status"))
+    )
+
+
+def apply_tracking_summary_to_order_cache(tracking_number, summary):
+    tracking_number = str(tracking_number or "").strip()
+    if not tracking_number or not summary:
+        return 0
+    normalized = normalize_scan_term(tracking_number)
+    updated = 0
+    status = summary.get("status") or "Booked"
+    for order in order_details:
+        changed_order = False
+        for item in order.get("line_items", []) or []:
+            if normalize_scan_term(item.get("tracking_number")) != normalized:
+                continue
+            item["status"] = status
+            item["name"] = summary.get("name") or item.get("name", "")
+            item["address"] = summary.get("address") or item.get("address", "")
+            item["city"] = summary.get("city") or item.get("city", "")
+            item["phone"] = summary.get("phone") or item.get("phone", "")
+            changed_order = True
+            updated += 1
+        if changed_order:
+            order["status"] = aggregate_order_status(order.get("line_items", []))
+    return updated
+
+
+def remember_tracking_summary(tracking_number, summary, fetched_at=None):
+    tracking_number = str(tracking_number or "").strip()
+    if not tracking_number or not summary:
+        return
+    tracking_summary_cache[tracking_number.upper()] = {
+        "fetched_at": fetched_at or time.time(),
+        "summary": summary,
+    }
+    apply_tracking_summary_to_order_cache(tracking_number, summary)
+
+
+def refresh_tracking_summaries_sync(
+    tracking_numbers,
+    *,
+    limit=None,
+    fresh_seconds=0,
+    deadline_seconds=TRACKING_REFRESH_SYNC_DEADLINE_SECONDS,
+):
+    unique_numbers = []
+    now = time.time()
+    for tracking_number in normalize_tracking_numbers(tracking_numbers):
+        cached = tracking_summary_cache.get(tracking_number.upper())
+        if cached and fresh_seconds and now - cached.get("fetched_at", 0) < fresh_seconds:
+            apply_tracking_summary_to_order_cache(tracking_number, cached.get("summary") or {})
+            continue
+        unique_numbers.append(tracking_number)
+        if limit and len(unique_numbers) >= limit:
+            break
 
     async def refresh_all():
-        timeout = aiohttp.ClientTimeout(total=15)
+        timeout = aiohttp.ClientTimeout(total=TRACKING_REFRESH_PER_SHIPMENT_TIMEOUT_SECONDS)
         semaphore = asyncio.Semaphore(6)
         refreshed_count = 0
+        refreshed_at = time.time()
         async with aiohttp.ClientSession(timeout=timeout) as session_obj:
             async def refresh_one(tracking_number):
                 nonlocal refreshed_count
                 async with semaphore:
                     try:
-                        data = await fetch_tracking_data(session_obj, tracking_number)
+                        data = await asyncio.wait_for(
+                            fetch_tracking_data(session_obj, tracking_number),
+                            timeout=TRACKING_REFRESH_PER_SHIPMENT_TIMEOUT_SECONDS,
+                        )
                         summary = summarize_tracking_result(tracking_number, data)
                     except Exception as error:
                         print(f"Could not refresh tracking summary for {tracking_number}: {error}")
                         return
-                    tracking_summary_cache[tracking_number.upper()] = {
-                        "fetched_at": time.time(),
-                        "summary": summary,
-                    }
+                    remember_tracking_summary(tracking_number, summary, refreshed_at)
                     refreshed_count += 1
 
-            await asyncio.gather(*(refresh_one(number) for number in unique_numbers))
+            tasks = [asyncio.create_task(refresh_one(number)) for number in unique_numbers]
+            done, pending = await asyncio.wait(tasks, timeout=deadline_seconds)
+            for task in pending:
+                task.cancel()
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+            for task in done:
+                try:
+                    task.result()
+                except Exception as error:
+                    print(f"Could not complete tracking refresh task: {error}")
         return refreshed_count
 
     if not unique_numbers:
         return 0
     return asyncio.run(refresh_all())
+
+
+def start_tracking_summaries_background_refresh(tracking_numbers):
+    unique_numbers = normalize_tracking_numbers(tracking_numbers)
+    if not unique_numbers:
+        return False
+
+    def run_background_refresh():
+        if not tracking_refresh_lock.acquire(blocking=False):
+            return
+        try:
+            refresh_tracking_summaries_sync(
+                unique_numbers,
+                limit=TRACKING_REFRESH_BACKGROUND_LIMIT,
+                fresh_seconds=TRACKING_REFRESH_FRESH_SECONDS,
+                deadline_seconds=TRACKING_REFRESH_BACKGROUND_DEADLINE_SECONDS,
+            )
+        finally:
+            tracking_refresh_lock.release()
+
+    threading.Thread(target=run_background_refresh, daemon=True).start()
+    return True
+
+
+def refresh_active_tracking_for_dashboard():
+    tracking_numbers = active_tracking_numbers_from_orders(order_details)
+    refreshed_count = refresh_tracking_summaries_sync(
+        tracking_numbers,
+        limit=TRACKING_REFRESH_SYNC_LIMIT,
+        fresh_seconds=TRACKING_REFRESH_FRESH_SECONDS,
+        deadline_seconds=TRACKING_REFRESH_SYNC_DEADLINE_SECONDS,
+    )
+    start_tracking_summaries_background_refresh(tracking_numbers)
+    return refreshed_count
 
 
 def ensure_required_shopify_webhooks():
@@ -2408,6 +2531,7 @@ def mark_paid_archive():
 
 @app.route("/")
 def tracking():
+    refresh_active_tracking_for_dashboard()
     return render_template(
         "track.html",
         order_details=order_details,
@@ -2440,6 +2564,8 @@ def display_tracking(tracking_num):
             return await fetch_tracking_data(session_obj, tracking_num)
 
     data = asyncio.run(run_lookup())
+    summary = summarize_tracking_result(tracking_num, data)
+    remember_tracking_summary(tracking_num, summary)
     matched_order = find_shopify_order_by_tracking_number(tracking_num)
     return render_template("trackingdata.html", data=data, tracking_number=tracking_num, matched_order=matched_order)
 
