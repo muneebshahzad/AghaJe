@@ -50,6 +50,10 @@ from shopify_protected_data import (
     save_offline_token,
     verify_oauth_hmac,
 )
+from digidokaan import (
+    fetch_tracking_history as fetch_digidokaan_tracking_history,
+    fetch_tracking_status as fetch_digidokaan_tracking_status,
+)
 
 
 app = Flask(__name__)
@@ -93,6 +97,15 @@ def is_leopards_tracking(tracking_number):
     return str(tracking_number or "").strip().upper().startswith("LE")
 
 
+def is_digidokaan_tracking(tracking_number, courier_name=""):
+    normalized = "".join(character for character in str(tracking_number or "") if character.isdigit())
+    courier = str(courier_name or "").casefold().replace(" ", "").replace("-", "")
+    return (
+        (len(normalized) in {14, 15} and normalized.startswith("223"))
+        or (bool(normalized) and "digidokaan" in courier)
+    )
+
+
 def is_postex_courier(courier_name=""):
     normalized = str(courier_name or "").strip().lower().replace(" ", "").replace("-", "")
     return "postex" in normalized
@@ -108,6 +121,8 @@ def is_postex_tracking(tracking_number="", courier_name=""):
 
 
 def courier_label_for_tracking(courier_name="", tracking_number=""):
+    if is_digidokaan_tracking(tracking_number, courier_name):
+        return "DigiDokaan"
     if is_leopards_tracking(tracking_number):
         return "Leopards"
     if is_postex_courier(courier_name) or is_postex_tracking(tracking_number):
@@ -1152,6 +1167,12 @@ def ensure_required_shopify_webhooks():
 async def fetch_tracking_data(session_obj, tracking_number):
     if not tracking_number or tracking_number == "N/A":
         return {}
+    if is_digidokaan_tracking(tracking_number):
+        history = await fetch_digidokaan_tracking_history(session_obj, tracking_number)
+        if history:
+            return history
+        status = await fetch_digidokaan_tracking_status(session_obj, tracking_number)
+        return [{"ProcessDescForPortal": status}] if status else []
     if is_leopards_tracking(tracking_number):
         api_key = os.getenv("LEOPARD_API_KEY")
         api_password = os.getenv("LEOPARD_PASSWORD") or os.getenv("LEOPARD_API_PASSWORD")
@@ -2614,6 +2635,8 @@ def refresh_data():
 def display_tracking(tracking_num):
     async def run_lookup():
         async with aiohttp.ClientSession() as session_obj:
+            if is_digidokaan_tracking(tracking_num):
+                return await fetch_digidokaan_tracking_history(session_obj, tracking_num)
             return await fetch_tracking_data(session_obj, tracking_num)
 
     data = asyncio.run(run_lookup())
