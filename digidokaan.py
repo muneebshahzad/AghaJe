@@ -4,6 +4,7 @@ import re
 import ssl
 import time
 from datetime import datetime
+from html.parser import HTMLParser
 
 import certifi
 from aiohttp import ClientTimeout
@@ -18,6 +19,74 @@ _ACTIVE_CACHE_SECONDS = 5 * 60
 _TERMINAL_CACHE_SECONDS = 24 * 60 * 60
 _TERMINAL_STATUSES = {"delivered", "returned", "return delivered", "cancelled"}
 _SSL_CONTEXT = ssl.create_default_context(cafile=certifi.where())
+
+
+class _PublicTrackingParser(HTMLParser):
+    def __init__(self, tracking_number):
+        super().__init__()
+        self.tracking_number = tracking_number
+        self.in_tracking_table = False
+        self.table_depth = 0
+        self.in_row = False
+        self.in_cell = False
+        self.cell_text = []
+        self.row = []
+        self.events = []
+        self.all_rows = []
+
+    def handle_starttag(self, tag, attrs):
+        attributes = dict(attrs)
+        if tag == "table":
+            if self.in_tracking_table:
+                self.table_depth += 1
+            elif "tracking-table" in str(attributes.get("class") or "").split():
+                self.in_tracking_table = True
+                self.table_depth = 1
+        if tag == "tr":
+            self.in_row = True
+            self.row = []
+        elif tag in {"td", "th"} and self.in_row:
+            self.in_cell = True
+            self.cell_text = []
+
+    def handle_data(self, data):
+        if self.in_cell:
+            self.cell_text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag in {"td", "th"} and self.in_cell:
+            self.row.append(" ".join("".join(self.cell_text).split()))
+            self.in_cell = False
+        elif tag == "tr" and self.in_row:
+            if len(self.row) >= 2:
+                self.all_rows.append(self.row[:2])
+                if self.in_tracking_table and self.row[0].casefold() != "date/time" and self.row[1].casefold() != "status":
+                    self.events.append({
+                        "ConsignmentNo": self.tracking_number,
+                        "TransactionDate": self.row[0],
+                        "ProcessDescForPortal": _clean_status(self.row[1]),
+                        "ReasonDesc": "",
+                    })
+            self.in_row = False
+            self.row = []
+        elif tag == "table" and self.in_tracking_table:
+            self.table_depth -= 1
+            if self.table_depth <= 0:
+                self.in_tracking_table = False
+
+    def history(self):
+        values = {}
+        for label, value in self.all_rows:
+            key = label.replace(":", "").strip().casefold()
+            if key in {"destination", "consignee"}:
+                values[key] = value.strip()
+        history = list(reversed(self.events))
+        for event in history:
+            event["ConsigneeName"] = values.get("consignee", "")
+            event["ConsigneeAddress"] = ""
+            event["ContactNo"] = ""
+            event["ConsigneeCity"] = values.get("destination", "")
+        return history
 
 
 def configuration():
@@ -155,6 +224,27 @@ async def _order_detail(session, tracking_number, config):
     return order, detail if detail_status == 200 else None
 
 
+async def _public_tracking_history(session, tracking_number):
+    """Read DigiDokaan's customer-facing tracker when merchant search has no row."""
+    try:
+        async with session.get(
+            "https://digidokaan.pk/real-time-tracking",
+            params={"t_id": tracking_number},
+            headers={"Accept": "text/html", "User-Agent": "Mozilla/5.0"},
+            timeout=ClientTimeout(total=20),
+            ssl=_SSL_CONTEXT,
+        ) as response:
+            page = await response.text()
+        if response.status != 200:
+            return []
+        parser = _PublicTrackingParser(tracking_number)
+        parser.feed(page)
+        return parser.history()
+    except Exception as error:
+        print(f"DigiDokaan public tracking unavailable for {tracking_number}: {error}")
+        return []
+
+
 def _cached_status(tracking_number):
     cached = _status_cache.get(tracking_number)
     if cached and cached[1] > time.monotonic():
@@ -167,7 +257,8 @@ def _cached_status(tracking_number):
 async def _fetch_status(session, tracking_number, config):
     order, detail = await _order_detail(session, tracking_number, config)
     if not order:
-        return None
+        history = await _public_tracking_history(session, tracking_number)
+        return history[-1].get("ProcessDescForPortal") if history else None
     fallback = _clean_status(order.get("courier_status") or order.get("status")) or None
     return _display_status(detail, fallback) if detail else fallback
 
@@ -182,7 +273,8 @@ async def fetch_tracking_status(session, tracking_number):
         return cached
     config = configuration()
     if not config:
-        return None
+        history = await _public_tracking_history(session, normalized)
+        return history[-1].get("ProcessDescForPortal") if history else None
     task = _inflight.get(normalized)
     if task is None:
         task = asyncio.create_task(_fetch_status(session, normalized, config))
@@ -205,8 +297,10 @@ async def fetch_tracking_history(session, tracking_number):
     """Return DigiDokaan events in the portal's existing history shape."""
     normalized = re.sub(r"\D", "", str(tracking_number or ""))
     config = configuration()
-    if not normalized or not config:
+    if not normalized:
         return []
+    if not config:
+        return await _public_tracking_history(session, normalized)
     try:
         order, detail_body = await _order_detail(session, normalized, config)
         data = detail_body.get("data") if isinstance(detail_body, dict) else None
@@ -214,7 +308,7 @@ async def fetch_tracking_history(session, tracking_number):
         tracking = data.get("tracking_response") if isinstance(data, dict) else None
         events = tracking.get("data") if isinstance(tracking, dict) else None
         if not isinstance(detail, dict) or not isinstance(events, list):
-            return []
+            return await _public_tracking_history(session, normalized)
         history = []
         for event in reversed(events):
             if not isinstance(event, dict) or not str(event.get("status") or "").strip():
@@ -232,4 +326,4 @@ async def fetch_tracking_history(session, tracking_number):
         return history
     except Exception as error:
         print(f"DigiDokaan tracking history unavailable for {normalized}: {error}")
-        return []
+        return await _public_tracking_history(session, normalized)

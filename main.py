@@ -1281,6 +1281,8 @@ def summarize_tracking_result(tracking_number, data):
             "phone": first.get("ContactNo") or "",
             "city": first.get("ConsigneeCity") or "",
         }
+    if is_digidokaan_tracking(tracking_number):
+        return {"status": "Tracking unavailable", "name": "", "address": "", "phone": "", "city": ""}
     return {"status": "Booked", "name": "", "address": "", "phone": "", "city": ""}
 
 

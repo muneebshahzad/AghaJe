@@ -78,6 +78,21 @@ class DigiDokaanTrackingTests(IsolatedAsyncioTestCase):
 
         self.assertEqual(status, "Undelivered - Customer unavailable")
 
+    def test_public_tracker_parser_returns_oldest_to_newest_history(self):
+        parser = digidokaan._PublicTrackingParser("22317469504278")
+        parser.feed("""
+            <table><tr><td><b>Destination :</b></td><td>Islamabad</td></tr>
+            <tr><td><b>Consignee :</b></td><td>Umair Nasir</td></tr></table>
+            <table class="ChildGrid tracking-table"><tr><th>Date/Time</th><th>Status</th></tr>
+            <tr><td>26-10-2026 12:13:00</td><td>Shipment - In Transit</td></tr>
+            <tr><td>24-10-2026 07:15:00</td><td>Shipment - Booked</td></tr></table>
+        """)
+        history = parser.history()
+
+        self.assertEqual([event["ProcessDescForPortal"] for event in history], ["Booked", "In Transit"])
+        self.assertEqual(history[-1]["ConsigneeName"], "Umair Nasir")
+        self.assertEqual(history[-1]["ConsigneeCity"], "Islamabad")
+
 
 def test_aghaje_routes_digidokaan_tracking(monkeypatch):
     monkeypatch.setenv("INITIALIZE_APP", "false")
@@ -87,3 +102,4 @@ def test_aghaje_routes_digidokaan_tracking(monkeypatch):
     assert main.is_digidokaan_tracking("22320269504284")
     assert main.courier_label_for_tracking("", "22322367960798") == "DigiDokaan"
     assert not main.is_digidokaan_tracking("LE123456")
+    assert main.summarize_tracking_result("22317469504278", [])["status"] == "Tracking unavailable"
